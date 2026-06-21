@@ -1,0 +1,315 @@
+# Balboa VL406 Remote Discovery
+
+<p align="center">
+  <img src="docs/BalboaGS100Controller.png" width="45%" alt="Balboa GS100 Controller" />
+  <img src="docs/BalboaVL260TopsidePanel.png" width="45%" alt="Balboa 4-button topside panel" />
+</p>
+
+## Description
+
+This repository is an experimental ESPHome project for reverse-engineering a Balboa VL406-style 4-button topside panel using the known-good VL260 hardware interface as a starting point.
+
+The goal of this repo is different from the original VL260 project:
+
+- keep the electrical interface and button injection wiring that already works for the 4-button Balboa family
+- add remote commissioning hooks so a customer device can be observed and controlled from Home Assistant
+- capture raw frame data on demand so a VL406 decoder can be built from field data
+
+This repository is not yet a confirmed drop-in VL406 decoder. The current codebase is a lab scaffold for collecting data and iterating remotely.
+
+---
+
+## Current Status
+
+- Hardware assumption: VCC, GND, DATA, and CLK are expected to match the VL260-style wiring.
+- Decoder status: the copied parser is still the VL260 parser until VL406 data collection is complete.
+- Remote-debug status: architecture is planned, but the MQTT command/response path still needs implementation.
+
+---
+
+## Repository Layout
+
+```text
+VL406/
+├── docs/
+├── esp32-spa/
+├── esp32-spa.yaml
+├── LICENSE
+└── spa-control-card.js
+```
+
+- `esp32-spa.yaml` is the starting ESPHome configuration for the lab device.
+- `esp32-spa/` contains the custom external component copied from the VL260 project.
+- `docs/REMOTE_COMMISSIONING.md` defines the intended MQTT, webhook, and OTA workflow.
+
+---
+
+## Immediate Goals
+
+1. Boot the customer device on their Wi-Fi using captive portal once.
+2. Receive a boot notification and health status in Home Assistant.
+3. Trigger remote button presses from Home Assistant.
+4. Request raw frame snapshots from the device on demand.
+5. Use captured data to identify the VL406 frame layout and create a real decoder.
+
+---
+
+## Software Installation
+
+1. Copy `esp32-spa.yaml` and the `esp32-spa/` folder into the `esphome/` directory used by Home Assistant.
+2. Create the required secrets in `secrets.yaml`.
+3. Import `esp32-spa.yaml` into ESPHome.
+4. Flash locally for the first install.
+5. After first join, future updates should use OTA only and must not use full flash erase if you want to preserve Wi-Fi credentials.
+
+The configuration currently expects these secrets:
+
+- `api_key`
+- `wifi_ssid`
+- `wifi_password`
+- `ota_password`
+- `ap_password`
+
+Additional MQTT and remote-debug secrets will be added when the command channel is implemented.
+
+---
+
+## Wiring
+
+The starting wiring matches the known working 4-button Balboa wiring used by the VL260 project.
+
+ESP32 DEVKIT V1 GPIO assignments:
+
+| Spa RJ45 pin | Function | GPIO pin |
+|---:|---|---:|
+| 1 | VIN | VIN |
+| 2 | Warm Button | 25 |
+| 3 | Light Button | 27 |
+| 4 | GND | GND |
+| 5 | Display Data | 34 |
+| 6 | Clock | 35 |
+| 7 | Jets Button | 32 |
+| 8 | Cool Button | 26 |
+
+Treat this as a working hypothesis for VL406 until verified from field testing.
+
+---
+
+## Remote Commissioning Plan
+
+The intended remote workflow is:
+
+1. Customer performs initial local flash and captive-portal onboarding.
+2. Device connects outbound to your systems.
+3. Home Assistant sends commands through MQTT over TLS.
+4. Device returns acknowledgements, raw frames, and update status.
+5. Firmware updates are delivered by outbound OTA pull so the device can update behind NAT.
+
+See `docs/REMOTE_COMMISSIONING.md` for the initial contract.
+
+---
+
+## Frontend
+
+The included `spa-control-card.js` is copied from the VL260 project as a starting point. It is useful for local manual control, but it should be treated as provisional until the VL406 entities and remote-debug workflow are finalized.
+
+---
+
+## Origin
+
+This project was bootstrapped from the working VL260 repository so that VL406 experimentation can move independently without destabilizing the original decoder.
+# Balboa-GS100-with-VL260-topside
+
+<p align="center">
+  <img src="docs/BalboaGS100Controller.png" width="45%" alt="Balboa GS100 Controller" />
+  <img src="docs/BalboaVL260TopsidePanel.png" width="45%" alt="VL260 Topside Panel" />
+</p>
+
+## Description
+
+This project adds an ESP32 to a Balboa GS100 (VL260 topside) to send and receive data using ESPHome and Home Assistant. It provides wiring, measurement notes, and an ESPHome configuration to integrate the spa panel with Home Assistant.
+
+This has only been tested with a Balboa GS100 control board and the VL260 topside panel, but this project should work for any spa with the VL260 topside panel. I imagine any 4-button Balboa topside controller would have a very similar setup. 
+
+The GS100 has an RJ45 connector that sends and receives data to the topside panel. This project taps into that signal by creating a project box that the topside panel will plug into, and then with another ethernet type cable connect the project box back to the GS100 control board.
+
+---
+
+## Software Installation
+
+1. Copy the `esp32-spa.yaml` file and the entire `esp32-spa` folder into your Home Assistant config folder under the `esphome/` subfolder. The folder layout should look like:
+
+```
+config/
+└── esphome/
+    ├── esp32-spa.yaml
+    └── esp32-spa/
+        ├── __init__.py
+        ├── binary_sensor.py
+        ├── esp32-spa.h
+        └── sensor.py
+```
+
+2. Edit the UNITS key in the esp32-spa.yaml file to set the temperature units. 
+
+3. In Home Assistant go to **ESPHome**, click **New Device** → **Import From File**, and select `esp32-spa.yaml`.
+
+4. `esp32-spa.yaml` will also look for a `secrets.yaml` file inside the **esphome/** folder for the following keys: `api_key`, `wifi_ssid`, `wifi_password`, `ota_password`, and `ap_password`.
+
+---
+
+## Wiring
+
+- An attempt was made with an ESP8266, but the Wi‑Fi and ISR requirements (or pin/boot choices) caused persistent boot issues, so the project uses an ESP32 which worked reliably.
+- The 4 buttons on the topside panel act like switches that connect to 5V when pressed, but when not pressed show ~2.5V. To avoid interfering with the panel we used optocouplers to reproduce the switch signals safely.
+- For the data and clock lines we use a simple voltage divider (2.2k and 4.7k) to reduce the voltage down to ~3.4V, then add a 220Ω series resistor to the ESP32 GPIOs.
+
+Wiring Diagram:
+![Wiring diagram](docs/wiring.png)
+
+ESP32 DEVKIT V1 GPIO assignments:
+
+| Spa RJ45 pin | Function | Wiring diagram color | GPIO pin |
+|---:|---|---|---|
+| 1 | VIN | red | VIN |
+| 2 | Warm Button | orange | 25 |
+| 3 | Light Button | purple | 27 |
+| 4 | GND | black | GND |
+| 5 | Display Data | green | 34 |
+| 6 | Clock | yellow | 35 |
+| 7 | Jets Button | blue | 32 |
+| 8 | Cool Button | lime green | 26 |
+
+---
+
+## Frontend
+
+This repository includes a Home Assistant custom card for controlling and monitoring the spa. To install the frontend component:
+
+1. Copy `spa-control-card.js` into your Home Assistant `www/` folder (e.g., `config/www/spa-control-card.js`).
+2. Open the dashboard where you want to add the card, click the three-dot menu (upper-right) and select **Manage resources**.
+3. Click **Add resource**, set **URL** to `/local/spa-control-card.js` and **Resourse Type** to `Javascript Module`, then save.
+4. Add the card to your dashboard via **Add Card** → search for **Spa Control Card** or use the raw YAML (below)
+5. For the Device Name, enter whatever you named your esp device. If you did not modify the yaml file, enter 'esp32-spa'. Given the device name, the frontend can discover all the required entities.
+
+```yaml
+type: 'custom:spa-control-card'      # required
+device_name: 'esp32-spa'      # required - replace with your esp device name
+title: 'Hot Tub Control'     # optional - card title
+high_setting: 103         # optional - Temp for one button press to high temp 
+low_setting: 80    # optional - Temp for one button press to low temp
+
+```
+
+If the card doesn't appear immediately, try a hard-refresh (Ctrl/Cmd+Shift+R) or clear the browser cache.
+
+![Spa Control Card](docs/spa-card.png)
+
+---
+
+## Error Codes
+
+- This integration exposes a `text_sensor` for error codes (sensor.<device name>_spa_error_code). The text sensor shows the 2‑character code from the topside display and a friendly translation when available, for example:
+
+  - `HH - high overheat (water temp over 118 F)`
+
+
+### Example Home Assistant automation (mobile push notification)
+
+Trigger a mobile push when a new error code appears (replace `notify.mobile_app_YOUR_DEVICE_NAME` with your device):
+
+```yaml
+alias: "Spa Error Notification"
+triggers:
+  - platform: state
+    entity_id: sensor.esp32_spa_spa_error_code
+condition:
+  - condition: template
+    value_template: >
+      {% set s = states('sensor.esp32_spa_spa_error_code') | lower %}
+      {{ s not in ['', 'unknown', 'none', 'unavailable'] }}
+action:
+  - service: notify.mobile_app_YOUR_DEVICE_NAME
+    data:
+      title: "Spa Alert"
+      message: "{{ states('sensor.esp32_spa_spa_error_code') }}"
+mode: single
+```
+
+## Measurements
+
+- The clock stream consists of 4 packets of data: three packets of 7 bits and a final packet with 3 bits.
+
+- Packet 1 (bits referenced MSB→LSB as 6 5 4 3 2 1 0):
+  - Bits 5 and 4 HIGH indicate a `1` in the hundreds digit (Fahrenheit display).
+  - Bit 2 is the heater status (when the heater is on this bit pulses).
+
+- Packets 2 & 3: used for the display characters where each bit maps to a segment of the 7-segment display. Here is the bit mapping (MSB→LSB):
+
+```
+Bit -> Segment
+6   = top
+5   = top-right
+4   = bottom-right
+3   = bottom
+2   = bottom-left
+1   = top-left
+0   = center
+```
+
+- Given the above bit mapping, the nubmer 7 would illuminate the top, top-right, and bottom-right segments, so those bits would be HIGH and the packet would look like this: 1110000.
+
+- Packet 4 (3 bits):
+  - Bit 2 = pump status
+  - Bit 1 = light status
+
+ - The remaining bits always appear LOW in my observation. I use them as a frame checksum. They are: Packet 1 bits 6, 3, 1, 0 and Packet 4 bit 0 (MSB to LSB).
+
+
+- Timing observations (from logic analyzer):
+  - Clock pulses: ~16 µs ON with ~21 µs gap between pulses.
+  - Data pulses: ~17.5 µs with ~20 µs gap; data is sampled on the rising edges of the clock.
+  - Each frame consists of 24 bits (4 packets of 7 bits, 7 bits, 7 bits, and 3 bits)
+  - Between each frame is a LOW segment of ~19ms.
+
+Logic analyzer screenshot:
+- In the screenshot below, the top signal is the data signal and the bottom is the clock.
+  - Packet 1 (bits 6543210)
+    - bit 6, 1, 0 LOW: used as a checksum (always LOW)
+    - bit 5, 4 LOW: indicates the hundreds digit of the display will be blank
+    - bit 2 HIGH: indicates the heater is on
+  - Packet 2 (bits 6543210)
+    - bit 6, 5, 4 HIGH: Translates into the number 7
+  - Packet 3 (bits 6543210)
+    - bit 6, 5, 4, 1, 0 HIGH: Translates into the number 9
+  - Therefore the display will show the temp of 79 degrees
+  - Packet 4 (bits 210)
+    - bit 2 HIGH: indicates the jets (in this case the circulation pump) is on
+    - bit 1 LOW: indicates the lights are off
+    - bit 0 LOW: used as a checksum (always LOW)
+
+![Logic Analyzer](docs/logicAnalyzer.png)
+
+---
+
+
+## Images
+
+
+![Connectors](docs/connectors.png)
+
+![PCB](docs/pcb.png)
+
+![Mounted](docs/mounted.png)
+
+---
+
+
+## Other Balboa projects
+
+- Balboa-GS510SZ with panel VL700S: https://github.com/MagnusPer/Balboa-GS510SZ
+- GL2000 Series: https://github.com/netmindz/balboa_GL_ML_spa_control
+- BP Series: https://github.com/ccutrer/balboa_worldwide_app
+- GS523SZ: https://github.com/Shuraxxx/-Balboa-GS523SZ-with-panel-VL801D-DeluxeSerie--MQTT
+
+

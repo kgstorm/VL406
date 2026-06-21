@@ -1,0 +1,206 @@
+substitutions:
+  UNITS: "F"  # F, or C
+  version: "1.0.0"  # overridden by CI on release
+
+esphome:
+  name: vl406
+  friendly_name: vl406
+  project:
+    name: "kgstorm.vl406"
+    version: ${version}
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: !secret api_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+  - platform: http_request
+    id: ota_http
+
+wifi:
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "VL406 Fallback Hotspot"
+    password: !secret ap_password
+
+logger:
+
+captive_portal:
+
+http_request:
+  useragent: esphome/vl406
+  timeout: 20s
+  buffer_size_rx: 2048
+  buffer_size_tx: 1024
+  redirect_limit: 5
+
+update:
+  - platform: http_request
+    name: "Firmware Update"
+    source: https://kgstorm.github.io/VL406/firmware/manifest.json
+    update_interval: 6h
+
+mqtt:
+  id: mqtt_client
+  broker: !secret mqtt_host
+  port: !secret mqtt_port
+  username: !secret mqtt_username
+  password: !secret mqtt_password
+  certificate_authority: !secret mqtt_ca_cert
+  discovery: false
+  birth_message:
+    topic: spa/vl406/status/state
+    payload: '{"online":true}'
+    retain: true
+  will_message:
+    topic: spa/vl406/status/state
+    payload: '{"online":false}'
+    retain: true
+  on_connect:
+    - mqtt.publish:
+        topic: spa/vl406/status/boot
+        payload: !lambda |-
+          return std::string("{\"device_id\":\"vl406\",\"fw_version\":\"${version}\",\"event\":\"boot\"}");
+  on_message:
+    - topic: spa/vl406/cmd/button
+      then:
+        - lambda: |-
+            std::string btn(x);
+            bool ok = false;
+            if (btn == "warm")  { id(btn_warm).press();  ok = true; }
+            else if (btn == "cool")  { id(btn_cool).press();  ok = true; }
+            else if (btn == "light") { id(btn_light).press(); ok = true; }
+            else if (btn == "pump")  { id(btn_pump).press();  ok = true; }
+            char ack[160];
+            snprintf(ack, sizeof(ack),
+              "{\"ok\":%s,\"action\":\"button\",\"detail\":\"%s\"}",
+              ok ? "true" : "false", btn.c_str());
+            id(mqtt_client).publish(std::string("spa/vl406/status/ack"), std::string(ack), 0, false);
+    - topic: spa/vl406/cmd/raw_request
+      then:
+        - lambda: |-
+            auto *h = id(display_handler);
+            uint32_t raw = h->last_published_value & 0xFFFFFF;
+            uint8_t p1 = (raw >> 17) & 0x7F;
+            uint8_t p2 = (raw >> 10) & 0x7F;
+            uint8_t p3 = (raw >> 3)  & 0x7F;
+            uint8_t p4 = raw & 0x7;
+            char buf[256];
+            snprintf(buf, sizeof(buf),
+              "{\"raw_hex\":\"0x%06X\",\"p1\":\"0x%02X\",\"p2\":\"0x%02X\",\"p3\":\"0x%02X\",\"p4\":\"0x%01X\",\"valid\":%s}",
+              (unsigned)raw,
+              (unsigned)p1, (unsigned)p2, (unsigned)p3, (unsigned)p4,
+              h->last_frame_valid ? "true" : "false");
+            id(mqtt_client).publish(std::string("spa/vl406/status/raw"), std::string(buf), 0, false);
+    - topic: spa/vl406/cmd/reboot
+      then:
+        - lambda: |-
+            id(mqtt_client).publish(std::string("spa/vl406/status/ack"),
+              std::string("{\"ok\":true,\"action\":\"reboot\",\"detail\":\"rebooting\"}"),
+              0, false);
+        - delay: 500ms
+        - lambda: App.safe_reboot();
+
+external_components:
+  - source: esp32-spa
+  
+text_sensor:
+  - platform: inputs
+    parent_id: display_handler
+    type: error_code
+    name: "Spa Error Code"
+
+# ===== HOT TUB DISPLAY INPUTS =====
+sensor:
+  - platform: inputs
+    id: display_handler
+    measured_temp:
+      name: "Spa Measured Temp"
+      id: spa_measured_temp
+      unit_of_measurement: "°${UNITS}"
+      accuracy_decimals: 0
+      device_class: temperature
+    set_temp:
+      name: "Spa Set Temp"
+      id: spa_set_temp
+      unit_of_measurement: "°${UNITS}"
+      accuracy_decimals: 0
+      device_class: temperature
+
+binary_sensor:
+  - platform: inputs
+    parent_id: display_handler
+    type: heater
+    name: "Spa Heater Status"
+  - platform: inputs
+    parent_id: display_handler
+    type: pump
+    name: "Spa Pump Status"
+  - platform: inputs
+    parent_id: display_handler
+    type: light
+    name: "Spa Light Status"
+
+# ===== BUTTONS (GPIO outputs) =====
+output:
+  - platform: gpio
+    id: spa_warm_out
+    pin: 25
+    inverted: false
+  - platform: gpio
+    id: spa_cool_out
+    pin: 26
+    inverted: false
+  - platform: gpio
+    id: spa_lights_out
+    pin: 27
+    inverted: false
+  - platform: gpio
+    id: spa_pumps_out
+    pin: 32
+    inverted: false
+
+button:
+  - platform: template
+    id: btn_warm
+    name: "Spa Warm"
+    icon: "mdi:thermometer-plus"
+    on_press:
+      - output.turn_on: spa_warm_out
+      - delay: 100ms
+      - output.turn_off: spa_warm_out
+
+  - platform: template
+    id: btn_cool
+    name: "Spa Cool"
+    icon: "mdi:thermometer-minus"
+    on_press:
+      - output.turn_on: spa_cool_out
+      - delay: 100ms
+      - output.turn_off: spa_cool_out
+
+  - platform: template
+    id: btn_light
+    name: "Spa Lights"
+    icon: "mdi:lightbulb"
+    on_press:
+      - output.turn_on: spa_lights_out
+      - delay: 100ms
+      - output.turn_off: spa_lights_out
+
+  - platform: template
+    id: btn_pump
+    name: "Spa Pumps"
+    icon: "mdi:pump"
+    on_press:
+      - output.turn_on: spa_pumps_out
+      - delay: 100ms
+      - output.turn_off: spa_pumps_out

@@ -1,0 +1,129 @@
+name: Build and Release Firmware
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install ESPHome
+        run: pip install esphome
+
+      - name: Extract version from tag (strip leading 'v')
+        id: version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+
+      - name: Create secrets.yaml for build
+        env:
+          API_KEY: ${{ secrets.RELEASE_API_KEY }}
+          OTA_PASSWORD: ${{ secrets.RELEASE_OTA_PASSWORD }}
+          AP_PASSWORD: ${{ secrets.RELEASE_AP_PASSWORD }}
+          MQTT_HOST: ${{ secrets.RELEASE_MQTT_HOST }}
+          MQTT_PORT: ${{ secrets.RELEASE_MQTT_PORT }}
+          MQTT_USERNAME: ${{ secrets.RELEASE_MQTT_USERNAME }}
+          MQTT_PASSWORD: ${{ secrets.RELEASE_MQTT_PASSWORD }}
+          MQTT_CA_CERT: ${{ secrets.RELEASE_MQTT_CA_CERT }}
+        run: |
+          python3 - << 'PYEOF'
+          import os
+          lines = [
+              f'api_key: "{os.environ["API_KEY"]}"',
+              f'ota_password: "{os.environ["OTA_PASSWORD"]}"',
+              f'ap_password: "{os.environ["AP_PASSWORD"]}"',
+              f'mqtt_host: "{os.environ["MQTT_HOST"]}"',
+              f'mqtt_port: {os.environ["MQTT_PORT"]}',
+              f'mqtt_username: "{os.environ["MQTT_USERNAME"]}"',
+              f'mqtt_password: "{os.environ["MQTT_PASSWORD"]}"',
+              'mqtt_ca_cert: |',
+          ]
+          # Indent the CA cert lines
+          for line in os.environ["MQTT_CA_CERT"].splitlines():
+              lines.append(f'  {line}')
+          with open("secrets.yaml", "w") as f:
+              f.write("\n".join(lines) + "\n")
+          PYEOF
+
+      - name: Build firmware
+        run: esphome -s version "${{ steps.version.outputs.VERSION }}" compile esp32-spa.yaml
+
+      - name: Locate firmware binary for OTA
+        id: firmware_ota
+        run: |
+          BIN=$(find .esphome/build -name "firmware.ota.bin" | head -1)
+          echo "Found OTA binary: $BIN"
+          OUTNAME="vl406-${{ steps.version.outputs.VERSION }}.bin"
+          cp "$BIN" "$OUTNAME"
+          echo "FILENAME=$OUTNAME" >> $GITHUB_OUTPUT
+
+      - name: Compute MD5
+        id: md5
+        run: echo "MD5=$(md5sum ${{ steps.firmware_ota.outputs.FILENAME }} | cut -d' ' -f1)" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release and upload firmware
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.firmware_ota.outputs.FILENAME }}
+          generate_release_notes: true
+          name: "Release ${{ github.ref_name }}"
+
+      - name: Generate firmware manifest for GitHub Pages
+        run: |
+          python3 - << 'PYEOF'
+          import json, os
+
+          version = os.environ["VERSION"]
+          md5 = os.environ["MD5"]
+          filename = os.environ["FILENAME"]
+
+          manifest = {
+              "name": "kgstorm.vl406",
+              "version": version,
+              "builds": [
+                  {
+                      "chipFamily": "ESP32",
+                      "ota": {
+                          "md5": md5,
+                          "path": filename,
+                          "summary": "See release notes for details.",
+                      },
+                  }
+              ],
+          }
+          os.makedirs("firmware", exist_ok=True)
+          with open("firmware/manifest.json", "w") as f:
+              json.dump(manifest, f, indent=2)
+              f.write("\n")
+          PYEOF
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+          MD5: ${{ steps.md5.outputs.MD5 }}
+          FILENAME: ${{ steps.firmware_ota.outputs.FILENAME }}
+
+      - name: Stage firmware for GitHub Pages
+        run: |
+          mkdir -p firmware
+          cp ${{ steps.firmware_ota.outputs.FILENAME }} firmware/
+
+      - name: Publish to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./firmware
+          keep_files: true
