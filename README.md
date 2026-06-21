@@ -23,7 +23,7 @@ This repository is not yet a confirmed drop-in VL406 decoder. The current codeba
 
 - Hardware assumption: VCC, GND, DATA, and CLK are expected to match the VL260-style wiring.
 - Decoder status: the copied parser is still the VL260 parser until VL406 data collection is complete.
-- Remote-debug status: architecture is planned, but the MQTT command/response path still needs implementation.
+- Remote-debug status: MQTT command/response is implemented with shared command topics and per-device response topics.
 
 ---
 
@@ -92,20 +92,6 @@ ESP32 DEVKIT V1 GPIO assignments:
 | 8 | Cool Button | 26 |
 
 Treat this as a working hypothesis for VL406 until verified from field testing.
-
----
-
-## Remote Commissioning Plan
-
-The intended remote workflow is:
-
-1. Customer performs initial local flash and captive-portal onboarding.
-2. Device connects outbound to your systems.
-3. Home Assistant sends commands through MQTT over TLS.
-4. Device returns acknowledgements, raw frames, and update status.
-5. Firmware updates are delivered by outbound OTA pull so the device can update behind NAT.
-
-See `docs/REMOTE_COMMISSIONING.md` for the initial contract.
 
 ---
 

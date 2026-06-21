@@ -39,10 +39,11 @@ namespace esp32_spa {
 class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::Sensor {
  public:
   // ---- Shared with ISR ----
-  volatile uint32_t shift_reg = 0;
+  volatile uint64_t shift_reg = 0;  // in-progress frame bits (up to 64 bits)
   volatile uint8_t bit_count = 0;
   volatile bool frame_ready = false;
-  // Note: removed time-based gap detection in ISR to avoid calling non-IRAM functions from ISR
+  // Frame boundary is detected purely by inter-frame gap (not a fixed bit count),
+  // so any frame length up to 64 bits is handled correctly.
 
   // ---- Publish control ----
   uint32_t last_publish_time = 0;
@@ -125,6 +126,11 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
   void set_heater_sensor(esphome::binary_sensor::BinarySensor *s) { heater_sensor_ = s; }
   void set_pump_sensor(esphome::binary_sensor::BinarySensor *s) { pump_sensor_ = s; }
   void set_light_sensor(esphome::binary_sensor::BinarySensor *s) { light_sensor_ = s; }
+
+  // Raw frame text sensor (publishes frame as binary string with bit-count prefix, e.g. "24:011011...")
+  esphome::text_sensor::TextSensor *raw_frame_sensor_ = nullptr;
+  uint64_t last_raw_frame_bits_ = UINT64_MAX;  // sentinel: no frame published yet
+  void set_raw_frame_sensor(esphome::text_sensor::TextSensor *s) { raw_frame_sensor_ = s; }
 
 
 
@@ -268,7 +274,7 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
     }
     portEXIT_CRITICAL(&spinlock_);
     if (partials > 0) {
-      ESP_LOGW(TAG, "Dropped %u partial/incomplete frames (gaps before 24 bits)", partials);
+      ESP_LOGW(TAG, "Dropped %u spurious gaps (clock edges with no accumulated bits)", partials);
     }
 
     // If no new frame, allow heartbeat publishes of last known value (only if last frame was valid)
@@ -385,12 +391,26 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
 
     // Copy shared data under spinlock to avoid races with ISR
     portENTER_CRITICAL(&spinlock_);
-    uint32_t value = shift_reg;
+    uint64_t value = completed_frame;
+    uint8_t  n_bits = completed_bit_count;
     frame_ready = false;
     portEXIT_CRITICAL(&spinlock_);
 
-    // Decode the frame and detect changes using decoded digits (not raw 24-bit value)
-    uint32_t out = value & 0xFFFFFF;
+    // Publish raw frame as a binary string with actual bit count prepended, e.g. "24:011011001..."
+    // This works regardless of how many bits the device actually sends.
+    if (raw_frame_sensor_ && value != last_raw_frame_bits_) {
+      last_raw_frame_bits_ = value;
+      char bits[70];  // "64:" + 64 bits + null
+      uint8_t pos = 0;
+      pos += snprintf(bits + pos, sizeof(bits) - pos, "%u:", static_cast<unsigned>(n_bits));
+      for (int i = n_bits - 1; i >= 0; --i) bits[pos++] = ((value >> i) & 1) ? '1' : '0';
+      bits[pos] = '\0';
+      raw_frame_sensor_->publish_state(std::string(bits));
+    }
+
+    // Decode the frame using the lower 24 bits for GS100-compatible decoding.
+    // If the frame turns out to be a different length, the raw_frame sensor above will reveal it.
+    uint32_t out = static_cast<uint32_t>(value) & 0xFFFFFF;
 
     // Split into parts
     uint8_t p1 = (out >> 17) & 0x7F;  // top 7 bits
@@ -660,7 +680,12 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
   // We avoid esp_timer_get_time() in ISR; use CPU cycle count and a fixed NOP delay to sample later.
   volatile uint32_t last_clock_ccount = 0;  // low-overhead 32-bit cycle counter (wraps naturally)
 
-  // Count partial/incomplete frames detected by ISR (incremented when a gap resets a non-24-bit frame)
+  // Completed frame buffer (written by ISR on gap, read by loop()).
+  // uint64_t supports up to 64 bits; actual bit count is stored separately.
+  volatile uint64_t completed_frame = 0;
+  volatile uint8_t  completed_bit_count = 0;
+
+  // Count partial/incomplete frames detected by ISR (incremented when a gap resets a 0-bit frame)
   volatile uint32_t partial_frame_count = 0;
 
   // CPU frequency assumptions and derived constants for timing
@@ -683,45 +708,44 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
   // Removed C++ static wrapper to avoid relocation/linker issues. A plain C ISR wrapper is defined at global scope.
 
   void IRAM_ATTR on_clock_edge_isr() {
-    // ISR: detect frame gap by measuring cycles since last clock edge using CPU ccount
-    // If gap > FRAME_GAP_CYCLES we treat as new frame and reset bit counter.
+    // ISR: frame boundary is the inter-frame gap, not a fixed bit count.
+    // On a gap: commit whatever was accumulated as a completed frame, then start fresh.
+    // This correctly handles any frame length up to 64 bits.
 
     portENTER_CRITICAL_ISR(&spinlock_);
 
     uint32_t now_ccount = get_cycle_count();
     if (last_clock_ccount != 0 && (now_ccount - last_clock_ccount) > FRAME_GAP_CYCLES) {
-      // Detected frame gap — if we had a partial frame (bit_count != 0 and != 24), count it
-      if (bit_count != 0 && bit_count != 24) {
+      if (bit_count > 0) {
+        // Commit the accumulated frame
+        completed_frame = shift_reg;
+        completed_bit_count = bit_count;
+        frame_ready = true;
+      } else {
+        // Gap with no bits — spurious gap, ignore
         partial_frame_count++;
       }
-      // Start a new frame
       shift_reg = 0;
       bit_count = 0;
-      // Optional debug: keep ISR short
     }
     last_clock_ccount = now_ccount;
 
-    // Record start and exit critical to minimize time interrupts are disabled
+    // Exit critical before busy-wait to minimise ISR latency impact on other interrupts
     uint32_t start_ccount = now_ccount;
     portEXIT_CRITICAL_ISR(&spinlock_);
 
-    // Busy-wait using cycle count to let the data line settle (more accurate than counting NOPs)
+    // Busy-wait for data line to settle
     while ((get_cycle_count() - start_ccount) < SAMPLE_DELAY_CYCLES) {
       asm volatile ("nop");
     }
 
-    // Re-enter critical briefly to sample DATA and update shared state
     portENTER_CRITICAL_ISR(&spinlock_);
     bool bit = gpio_get_level((gpio_num_t)DATA_PIN);
-
-    shift_reg = (shift_reg << 1) | static_cast<uint32_t>(bit);
-    bit_count++;
-
-    if (bit_count == 24) {
-      frame_ready = true;
-      bit_count = 0;
+    // Cap at 64 bits to avoid overflow; extra bits are silently dropped
+    if (bit_count < 64) {
+      shift_reg = (shift_reg << 1) | static_cast<uint64_t>(bit);
+      bit_count++;
     }
-
     portEXIT_CRITICAL_ISR(&spinlock_);
   }
 };

@@ -11,7 +11,7 @@ CONF_PARENT_ID = 'parent_id'
 # This platform requires referencing an existing HotTubDisplaySensor instance
 CONFIG_SCHEMA = text_sensor.text_sensor_schema().extend({
     cv.Required(CONF_PARENT_ID): cv.use_id(HotTubDisplaySensor),
-    cv.Required('type'): cv.enum({'error_code': 'ERROR_CODE'}),
+    cv.Required('type'): cv.enum({'error_code': 'ERROR_CODE', 'raw_frame': 'RAW_FRAME'}),
 })
 
 
@@ -22,3 +22,5 @@ async def to_code(config):
     sensor_type = config['type']
     if sensor_type == 'error_code':
         cg.add(parent.set_error_text_sensor(var))
+    elif sensor_type == 'raw_frame':
+        cg.add(parent.set_raw_frame_sensor(var))

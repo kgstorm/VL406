@@ -1,10 +1,11 @@
 substitutions:
   UNITS: "F"  # F, or C
-  version: "1.0.0"  # overridden by CI on release
+  version: "1.1.0"  # overridden by CI on release
 
 esphome:
   name: vl406
   friendly_name: vl406
+  name_add_mac_suffix: true
   project:
     name: "kgstorm.vl406"
     version: ${version}
@@ -56,26 +57,26 @@ mqtt:
   password: !secret mqtt_password
   certificate_authority: !secret mqtt_ca_cert
   discovery: false
-  birth_message:
-    topic: spa/vl406/status/state
-    payload: '{"online":true}'
-    retain: true
-  will_message:
-    topic: spa/vl406/status/state
-    payload: '{"online":false}'
-    retain: true
   on_connect:
-    - mqtt.publish:
-        topic: spa/vl406/status/boot
-        payload: !lambda |-
-          return std::string("{\"device_id\":\"vl406\",\"fw_version\":\"${version}\",\"event\":\"boot\"}");
-  on_message:
-    - topic: spa/vl406/cmd/button
-      then:
-        - lambda: |-
-            std::string btn(x);
+    - lambda: |-
+        std::string device(App.get_name().c_str());
+
+        // Boot message
+        id(mqtt_client).publish("spa/status/boot",
+          std::string("{\"device_id\":\"") + device +
+          std::string("\",\"fw_version\":\"${version}\",\"event\":\"boot\"}"), 0, false);
+
+        // Subscribe to per-device command topics exactly once (guard against reconnects).
+        static bool subscribed = false;
+        if (subscribed) return;
+        subscribed = true;
+
+        id(mqtt_client).subscribe("spa/" + device + "/cmd/button",
+          [device](const std::string &topic, const std::string &payload) {
+            std::string btn = payload;
+            if (btn.rfind("button=", 0) == 0) btn = btn.substr(7);
             bool ok = false;
-            if (btn == "warm")  { id(btn_warm).press();  ok = true; }
+            if      (btn == "warm")  { id(btn_warm).press();  ok = true; }
             else if (btn == "cool")  { id(btn_cool).press();  ok = true; }
             else if (btn == "light") { id(btn_light).press(); ok = true; }
             else if (btn == "pump")  { id(btn_pump).press();  ok = true; }
@@ -83,31 +84,21 @@ mqtt:
             snprintf(ack, sizeof(ack),
               "{\"ok\":%s,\"action\":\"button\",\"detail\":\"%s\"}",
               ok ? "true" : "false", btn.c_str());
-            id(mqtt_client).publish(std::string("spa/vl406/status/ack"), std::string(ack), 0, false);
-    - topic: spa/vl406/cmd/raw_request
-      then:
-        - lambda: |-
-            auto *h = id(display_handler);
-            uint32_t raw = h->last_published_value & 0xFFFFFF;
-            uint8_t p1 = (raw >> 17) & 0x7F;
-            uint8_t p2 = (raw >> 10) & 0x7F;
-            uint8_t p3 = (raw >> 3)  & 0x7F;
-            uint8_t p4 = raw & 0x7;
-            char buf[256];
-            snprintf(buf, sizeof(buf),
-              "{\"raw_hex\":\"0x%06X\",\"p1\":\"0x%02X\",\"p2\":\"0x%02X\",\"p3\":\"0x%02X\",\"p4\":\"0x%01X\",\"valid\":%s}",
-              (unsigned)raw,
-              (unsigned)p1, (unsigned)p2, (unsigned)p3, (unsigned)p4,
-              h->last_frame_valid ? "true" : "false");
-            id(mqtt_client).publish(std::string("spa/vl406/status/raw"), std::string(buf), 0, false);
-    - topic: spa/vl406/cmd/reboot
-      then:
-        - lambda: |-
-            id(mqtt_client).publish(std::string("spa/vl406/status/ack"),
-              std::string("{\"ok\":true,\"action\":\"reboot\",\"detail\":\"rebooting\"}"),
-              0, false);
-        - delay: 500ms
-        - lambda: App.safe_reboot();
+            id(mqtt_client).publish(device + "/status/ack", std::string(ack), 0, false);
+          }, 0);
+
+        id(mqtt_client).subscribe("spa/" + device + "/cmd/raw_request",
+          [device](const std::string &topic, const std::string &payload) {
+            id(mqtt_client).publish(device + "/status/raw", id(spa_raw_frame).state, 0, false);
+          }, 0);
+
+        id(mqtt_client).subscribe("spa/" + device + "/cmd/reboot",
+          [device](const std::string &topic, const std::string &payload) {
+            id(mqtt_client).publish(device + "/status/ack",
+              std::string("{\"ok\":true,\"action\":\"reboot\",\"detail\":\"rebooting\"}"), 0, false);
+            esphome::delay(500);
+            App.safe_reboot();
+          }, 0);
 
 external_components:
   - source: esp32-spa
@@ -117,6 +108,11 @@ text_sensor:
     parent_id: display_handler
     type: error_code
     name: "Spa Error Code"
+  - platform: inputs
+    parent_id: display_handler
+    type: raw_frame
+    name: "Spa Raw Frame"
+    id: spa_raw_frame
 
 # ===== HOT TUB DISPLAY INPUTS =====
 sensor:

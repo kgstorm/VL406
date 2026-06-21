@@ -14,19 +14,20 @@ Both sides can be behind NAT because the ESP32 and Home Assistant each establish
 
 ## Initial MQTT Topic Contract
 
-Use one device-specific namespace per board:
+Use a shared command namespace for the fleet, and target a specific device in the payload when needed:
 
 ```text
-spa/<device_id>/cmd/button
-spa/<device_id>/cmd/raw_request
-spa/<device_id>/cmd/update
-spa/<device_id>/cmd/reboot
-spa/<device_id>/status/ack
-spa/<device_id>/status/raw
-spa/<device_id>/status/boot
-spa/<device_id>/status/update
-spa/<device_id>/status/state
+spa/cmd/button
+spa/cmd/raw_request
+spa/cmd/reboot
+spa/status/boot
+spa/status/state
 ```
+
+- Broadcast commands use plain payloads such as `warm`, `cool`, `light`, `pump`, or `raw_request`.
+- Targeted commands prefix the payload with `target=<device_name>;`, for example `target=vl406-a4f00f5d46e0;warm`.
+- Acknowledgements and raw-frame snapshots are published on `<device_name>/status/ack` and `<device_name>/status/raw`, where `<device_name>` is the ESPHome name with its MAC suffix.
+- Boot messages include the runtime device name in the payload so Home Assistant can map the device to its per-device response topics.
 
 ## First Implementation Slice
 
