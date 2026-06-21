@@ -66,16 +66,6 @@ mqtt:
     - lambda: |-
         std::string device(App.get_name().c_str());
 
-        // Boot message
-        bool boot_ok = id(mqtt_client).publish("spa/status/boot",
-          std::string("{\"device_id\":\"") + device +
-          std::string("\",\"fw_version\":\"${version}\",\"event\":\"boot\"}"), 1, true);
-        if (boot_ok) {
-          ESP_LOGI("mqtt_boot", "Published boot event to spa/status/boot for %s", device.c_str());
-        } else {
-          ESP_LOGW("mqtt_boot", "Failed to publish boot event to spa/status/boot (likely ACL/permissions)");
-        }
-
         // Subscribe to per-device command topics exactly once (guard against reconnects).
         static bool subscribed = false;
         if (subscribed) return;
@@ -109,17 +99,17 @@ mqtt:
             esphome::delay(500);
             App.safe_reboot();
           }, 0);
-        - delay: 5000ms
-        - lambda: !lambda |-
-            std::string device(App.get_name().c_str());
-            bool boot_ok = id(mqtt_client).publish("spa/status/boot",
-              std::string("{\"device_id\":\"") + device +
-              std::string("\",\"fw_version\":\"${version}\",\"event\":\"boot\"}"), 1, true);
-            if (boot_ok) {
-              ESP_LOGI("mqtt_boot", "Published boot event to spa/status/boot for %s", device.c_str());
-            } else {
-              ESP_LOGW("mqtt_boot", "Failed to publish boot event to spa/status/boot after connect delay");
-            }
+    - delay: 5000ms
+    - lambda: |-
+        std::string device(App.get_name().c_str());
+        bool boot_ok = id(mqtt_client).publish("spa/status/boot",
+          std::string("{\"device_id\":\"") + device +
+          std::string("\",\"fw_version\":\"${version}\",\"event\":\"boot\"}"), 1, true);
+        if (boot_ok) {
+          ESP_LOGI("mqtt_boot", "Published boot event to spa/status/boot for %s", device.c_str());
+        } else {
+          ESP_LOGW("mqtt_boot", "Failed to publish boot event to spa/status/boot after connect delay");
+        }
 
 external_components:
   - source: esp32-spa
