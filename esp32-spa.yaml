@@ -1,6 +1,6 @@
 substitutions:
   UNITS: "F"  # F, or C
-  version: "1.1.4"  # overridden by CI on release
+  version: "1.1.5"  # overridden by CI on release
 
 esphome:
   name: vl406
@@ -109,6 +109,17 @@ mqtt:
             esphome::delay(500);
             App.safe_reboot();
           }, 0);
+        - delay: 5000ms
+        - lambda: !lambda |-
+            std::string device(App.get_name().c_str());
+            bool boot_ok = id(mqtt_client).publish("spa/status/boot",
+              std::string("{\"device_id\":\"") + device +
+              std::string("\",\"fw_version\":\"${version}\",\"event\":\"boot\"}"), 1, true);
+            if (boot_ok) {
+              ESP_LOGI("mqtt_boot", "Published boot event to spa/status/boot for %s", device.c_str());
+            } else {
+              ESP_LOGW("mqtt_boot", "Failed to publish boot event to spa/status/boot after connect delay");
+            }
 
 external_components:
   - source: esp32-spa
