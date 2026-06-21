@@ -1,6 +1,6 @@
 substitutions:
   UNITS: "F"  # F, or C
-  version: "1.1.1"  # overridden by CI on release
+  version: "1.1.2"  # overridden by CI on release
 
 esphome:
   name: vl406
@@ -43,12 +43,6 @@ http_request:
   buffer_size_tx: 1024
   redirect_limit: 5
 
-update:
-  - platform: http_request
-    name: "Firmware Update"
-    source: https://kgstorm.github.io/VL406/firmware/manifest.json
-    update_interval: 6h
-
 mqtt:
   id: mqtt_client
   broker: !secret mqtt_host
@@ -57,6 +51,11 @@ mqtt:
   password: !secret mqtt_password
   certificate_authority: !secret mqtt_ca_cert
   discovery: false
+  topic_prefix: null
+  birth_message:
+  will_message:
+  shutdown_message:
+  log_topic:
   on_connect:
     - lambda: |-
         std::string device(App.get_name().c_str());
