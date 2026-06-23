@@ -1,12 +1,12 @@
 {
   "name": "kgstorm.vl406",
-  "version": "1.1.8",
+  "version": "1.1.9",
   "builds": [
     {
       "chipFamily": "ESP32",
       "ota": {
-        "md5": "6132a9e6bbe76013771f68811ec1ee8d",
-        "path": "vl406-1.1.8.bin",
+        "md5": "c309a944e323d55a24f27f2a969c3449",
+        "path": "vl406-1.1.9.bin",
         "summary": "See release notes for details."
       }
     }
