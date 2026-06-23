@@ -1,6 +1,6 @@
 substitutions:
   UNITS: "F"  # F, or C
-  version: "1.2.0"  # overridden by CI on release
+  version: "1.2.1"  # overridden by CI on release
 
 esphome:
   name: vl406
