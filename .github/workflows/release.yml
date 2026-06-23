@@ -75,14 +75,16 @@ jobs:
       - name: Compute MD5
         id: md5
         run: echo "MD5=$(md5sum ${{ steps.firmware_ota.outputs.FILENAME }} | cut -d' ' -f1)" >> $GITHUB_OUTPUT
-
-      - name: Create GitHub Release and upload firmware
+          
+      - name: Create GitHub Release and upload assets
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ steps.firmware_ota.outputs.FILENAME }}
+          files: |
+            ${{ steps.firmware_ota.outputs.FILENAME }}
+            dist/spa-control-card.js
           generate_release_notes: true
           name: "Release ${{ github.ref_name }}"
-
+    
       - name: Generate firmware manifest for GitHub Pages
         run: |
           python3 - << 'PYEOF'
