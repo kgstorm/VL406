@@ -1,6 +1,6 @@
 substitutions:
   UNITS: "F"  # F, or C
-  version: "1.2.2"  # overridden by CI on release
+  version: "1.2.3"  # overridden by CI on release
 
 esphome:
   name: vl406
@@ -181,6 +181,7 @@ button:
     name: "Spa Warm"
     icon: "mdi:thermometer-plus"
     on_press:
+      - logger.log: "Button pressed: WARM"
       - output.turn_on: spa_warm_out
       - delay: 100ms
       - output.turn_off: spa_warm_out
@@ -190,6 +191,7 @@ button:
     name: "Spa Cool"
     icon: "mdi:thermometer-minus"
     on_press:
+      - logger.log: "Button pressed: COOL"
       - output.turn_on: spa_cool_out
       - delay: 100ms
       - output.turn_off: spa_cool_out
@@ -199,6 +201,7 @@ button:
     name: "Spa Lights"
     icon: "mdi:lightbulb"
     on_press:
+      - logger.log: "Button pressed: LIGHTS"
       - output.turn_on: spa_lights_out
       - delay: 100ms
       - output.turn_off: spa_lights_out
@@ -208,6 +211,7 @@ button:
     name: "Spa Pumps"
     icon: "mdi:pump"
     on_press:
+      - logger.log: "Button pressed: PUMPS"
       - output.turn_on: spa_pumps_out
       - delay: 100ms
       - output.turn_off: spa_pumps_out

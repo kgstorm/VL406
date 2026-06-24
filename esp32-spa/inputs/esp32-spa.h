@@ -129,8 +129,176 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
 
   // Raw frame text sensor (publishes frame as binary string with bit-count prefix, e.g. "24:011011...")
   esphome::text_sensor::TextSensor *raw_frame_sensor_ = nullptr;
-  uint64_t last_raw_frame_bits_ = UINT64_MAX;  // sentinel: no frame published yet
   void set_raw_frame_sensor(esphome::text_sensor::TextSensor *s) { raw_frame_sensor_ = s; }
+
+  struct DiscoverySample {
+    uint8_t bit_count;
+    uint64_t value;
+  };
+
+  struct DiscoveryPattern {
+    uint8_t bit_count = 0;
+    uint64_t value = 0;
+    uint16_t count = 0;
+  };
+
+  static constexpr uint8_t DISCOVERY_WINDOW_FRAMES = 100;
+  static constexpr uint8_t DISCOVERY_PATTERN_SLOTS = 48;  // enough slots for all unique patterns in a 100-frame window
+  static constexpr uint8_t DISCOVERY_LOG_INTERVAL = 100;  // one summary per full window rotation
+
+  DiscoverySample discovery_window_[DISCOVERY_WINDOW_FRAMES] = {};
+  DiscoveryPattern discovery_patterns_[DISCOVERY_PATTERN_SLOTS] = {};
+  uint16_t discovery_window_size_ = 0;
+  uint16_t discovery_window_pos_ = 0;
+  uint16_t discovery_length_hist_[65] = {};
+  uint32_t discovery_frame_seq_ = 0;
+  uint32_t discovery_last_summary_seq_ = 0;
+
+  void discovery_add_pattern(uint8_t bit_count, uint64_t value) {
+    int free_slot = -1;
+    int weakest_slot = 0;
+    uint16_t weakest_count = 0xFFFF;
+
+    for (uint8_t i = 0; i < DISCOVERY_PATTERN_SLOTS; ++i) {
+      auto &slot = discovery_patterns_[i];
+      if (slot.count == 0) {
+        if (free_slot < 0) free_slot = i;
+        continue;
+      }
+      if (slot.bit_count == bit_count && slot.value == value) {
+        slot.count++;
+        return;
+      }
+      if (slot.count < weakest_count) {
+        weakest_count = slot.count;
+        weakest_slot = i;
+      }
+    }
+
+    int target = free_slot >= 0 ? free_slot : weakest_slot;
+    discovery_patterns_[target].bit_count = bit_count;
+    discovery_patterns_[target].value = value;
+    discovery_patterns_[target].count = 1;
+  }
+
+  void discovery_remove_pattern(uint8_t bit_count, uint64_t value) {
+    for (uint8_t i = 0; i < DISCOVERY_PATTERN_SLOTS; ++i) {
+      auto &slot = discovery_patterns_[i];
+      if (slot.count > 0 && slot.bit_count == bit_count && slot.value == value) {
+        if (--slot.count == 0) {
+          slot.bit_count = 0;
+          slot.value = 0;
+        }
+        return;
+      }
+    }
+  }
+
+  void discovery_log_summary() {
+    if (discovery_window_size_ == 0) return;
+
+    uint8_t top_length[3] = {0, 0, 0};
+    uint16_t top_length_count[3] = {0, 0, 0};
+    for (uint8_t bits = 0; bits <= 64; ++bits) {
+      uint16_t count = discovery_length_hist_[bits];
+      if (count == 0) continue;
+      for (uint8_t i = 0; i < 3; ++i) {
+        if (count > top_length_count[i]) {
+          for (uint8_t j = 2; j > i; --j) {
+            top_length_count[j] = top_length_count[j - 1];
+            top_length[j] = top_length[j - 1];
+          }
+          top_length_count[i] = count;
+          top_length[i] = bits;
+          break;
+        }
+      }
+    }
+
+    uint8_t top_slot[3] = {255, 255, 255};
+    uint16_t top_count[3] = {0, 0, 0};
+    for (uint8_t i = 0; i < DISCOVERY_PATTERN_SLOTS; ++i) {
+      const auto &slot = discovery_patterns_[i];
+      if (slot.count == 0) continue;
+      for (uint8_t j = 0; j < 3; ++j) {
+        if (slot.count > top_count[j]) {
+          for (uint8_t k = 2; k > j; --k) {
+            top_count[k] = top_count[k - 1];
+            top_slot[k] = top_slot[k - 1];
+          }
+          top_count[j] = slot.count;
+          top_slot[j] = i;
+          break;
+        }
+      }
+    }
+
+    char message[512];
+    size_t pos = 0;
+    pos += snprintf(message + pos, sizeof(message) - pos,
+      "Discovery window seq=%u frames=%u lengths:",
+      static_cast<unsigned>(discovery_frame_seq_), static_cast<unsigned>(discovery_window_size_));
+
+    for (uint8_t i = 0; i < 3; ++i) {
+      if (top_length_count[i] == 0) continue;
+      pos += snprintf(message + pos, sizeof(message) - pos,
+        " %u=%u", static_cast<unsigned>(top_length[i]), static_cast<unsigned>(top_length_count[i]));
+    }
+
+    pos += snprintf(message + pos, sizeof(message) - pos, " patterns:");
+
+    for (uint8_t i = 0; i < 3; ++i) {
+      if (top_slot[i] == 255) continue;
+      const auto &slot = discovery_patterns_[top_slot[i]];
+      char bits[68];  // 64 bits + '\0' + margin
+      size_t bit_pos = 0;
+      for (int b = slot.bit_count - 1; b >= 0 && bit_pos + 1 < sizeof(bits); --b) {
+        bits[bit_pos++] = ((slot.value >> b) & 1ULL) ? '1' : '0';
+      }
+      bits[bit_pos] = '\0';
+      pos += snprintf(message + pos, sizeof(message) - pos,
+        " %u:%s x%u", static_cast<unsigned>(slot.bit_count), bits, static_cast<unsigned>(slot.count));
+    }
+
+    ESP_LOGI(TAG, "%s", message);
+  }
+
+  void discovery_record_frame(uint8_t bit_count, uint64_t value) {
+    discovery_frame_seq_++;
+
+    if (bit_count <= 64) {
+      discovery_length_hist_[bit_count]++;
+    }
+
+    if (discovery_window_size_ == DISCOVERY_WINDOW_FRAMES) {
+      const auto &oldest = discovery_window_[discovery_window_pos_];
+      if (oldest.bit_count <= 64 && discovery_length_hist_[oldest.bit_count] > 0) {
+        discovery_length_hist_[oldest.bit_count]--;
+      }
+      discovery_remove_pattern(oldest.bit_count, oldest.value);
+    } else {
+      discovery_window_size_++;
+    }
+
+    discovery_window_[discovery_window_pos_] = {bit_count, value};
+    discovery_window_pos_ = static_cast<uint16_t>((discovery_window_pos_ + 1) % DISCOVERY_WINDOW_FRAMES);
+    discovery_add_pattern(bit_count, value);
+
+    if (discovery_window_size_ == DISCOVERY_WINDOW_FRAMES &&
+        (discovery_frame_seq_ - discovery_last_summary_seq_) >= DISCOVERY_LOG_INTERVAL) {
+      discovery_log_summary();
+      discovery_last_summary_seq_ = discovery_frame_seq_;
+    }
+  }
+
+  static void append_bits(char *buffer, size_t buffer_size, uint64_t value, uint8_t bit_count) {
+    if (buffer_size == 0) return;
+    size_t pos = 0;
+    for (int bit = bit_count - 1; bit >= 0 && pos + 1 < buffer_size; --bit) {
+      buffer[pos++] = ((value >> bit) & 1ULL) ? '1' : '0';
+    }
+    buffer[pos] = '\0';
+  }
 
 
 
@@ -334,8 +502,6 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
         return;
       }
 
-      uint8_t seg_b = (p1 >> 5) & 0x1;
-      uint8_t seg_c = (p1 >> 4) & 0x1;
       int8_t digit2 = decode_7seg(p2);
       int8_t digit3 = decode_7seg(p3);
 
@@ -396,20 +562,26 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
     frame_ready = false;
     portEXIT_CRITICAL(&spinlock_);
 
-    // Publish raw frame as a binary string with actual bit count prepended, e.g. "24:011011001..."
-    // This works regardless of how many bits the device actually sends.
-    if (raw_frame_sensor_ && value != last_raw_frame_bits_) {
-      last_raw_frame_bits_ = value;
-      char bits[70];  // "64:" + 64 bits + null
-      uint8_t pos = 0;
-      pos += snprintf(bits + pos, sizeof(bits) - pos, "%u:", static_cast<unsigned>(n_bits));
-      for (int i = n_bits - 1; i >= 0; --i) bits[pos++] = ((value >> i) & 1) ? '1' : '0';
-      bits[pos] = '\0';
+    discovery_record_frame(n_bits, value);
+
+    // Publish every observed frame so discovery tooling can count repeats and cluster by length.
+    if (raw_frame_sensor_) {
+      char bits[128];
+      size_t pos = 0;
+      int written = snprintf(bits + pos, sizeof(bits) - pos, "%u|%u:",
+        static_cast<unsigned>(discovery_frame_seq_), static_cast<unsigned>(n_bits));
+      if (written > 0) pos += static_cast<size_t>(written);
+      append_bits(bits + pos, sizeof(bits) - pos, value, n_bits);
       raw_frame_sensor_->publish_state(std::string(bits));
     }
 
+    // For protocol discovery, only keep the legacy temperature/state decoder when the frame is 24 bits.
+    if (n_bits != 24) {
+      last_frame_valid = false;
+      return;
+    }
+
     // Decode the frame using the lower 24 bits for GS100-compatible decoding.
-    // If the frame turns out to be a different length, the raw_frame sensor above will reveal it.
     uint32_t out = static_cast<uint32_t>(value) & 0xFFFFFF;
 
     // Split into parts
@@ -652,8 +824,6 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
       if (heater_sensor_) { heater_sensor_->publish_state(static_cast<bool>(pub_heater)); last_heater = pub_heater; }
       if (pump_sensor_) { pump_sensor_->publish_state(static_cast<bool>(pub_pump)); last_pump = pub_pump; }
       if (light_sensor_) { light_sensor_->publish_state(static_cast<bool>(pub_light)); last_light = pub_light; }
-      
-      ESP_LOGD(TAG, "Binary sensors updated: heater=%d pump=%d light=%d", pub_heater, pub_pump, pub_light);
 
       last_published_value = value;
       last_publish_time = now;
