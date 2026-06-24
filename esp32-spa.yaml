@@ -38,78 +38,16 @@ wifi:
     ssid: "VL406 Fallback Hotspot"
     password: !secret ap_password
 
-logger:
-
 captive_portal:
 
+logger:
+
 http_request:
-  useragent: esphome/vl406
+  useragent: esphome/esp32-spa
   timeout: 20s
   buffer_size_rx: 2048
   buffer_size_tx: 1024
   redirect_limit: 5
-
-mqtt:
-  id: mqtt_client
-  broker: !secret mqtt_host
-  port: !secret mqtt_port
-  username: !secret mqtt_username
-  password: !secret mqtt_password
-  certificate_authority: !secret mqtt_ca_cert
-  discovery: false
-  topic_prefix: null
-  birth_message:
-  will_message:
-  shutdown_message:
-  log_topic:
-  on_connect:
-    - lambda: |-
-        std::string device(App.get_name().c_str());
-
-        // Subscribe to per-device command topics exactly once (guard against reconnects).
-        static bool subscribed = false;
-        if (subscribed) return;
-        subscribed = true;
-
-        id(mqtt_client).subscribe("spa/" + device + "/cmd/button",
-          [device](const std::string &topic, const std::string &payload) {
-            std::string btn = payload;
-            if (btn.rfind("button=", 0) == 0) btn = btn.substr(7);
-            bool ok = false;
-            if      (btn == "warm")  { id(btn_warm).press();  ok = true; }
-            else if (btn == "cool")  { id(btn_cool).press();  ok = true; }
-            else if (btn == "light") { id(btn_light).press(); ok = true; }
-            else if (btn == "pump")  { id(btn_pump).press();  ok = true; }
-            char ack[160];
-            snprintf(ack, sizeof(ack),
-              "{\"ok\":%s,\"action\":\"button\",\"detail\":\"%s\"}",
-              ok ? "true" : "false", btn.c_str());
-            id(mqtt_client).publish(device + "/status/ack", std::string(ack), 0, false);
-          }, 0);
-
-        id(mqtt_client).subscribe("spa/" + device + "/cmd/raw_request",
-          [device](const std::string &topic, const std::string &payload) {
-            id(mqtt_client).publish(device + "/status/raw", id(spa_raw_frame).state, 0, false);
-          }, 0);
-
-        id(mqtt_client).subscribe("spa/" + device + "/cmd/reboot",
-          [device](const std::string &topic, const std::string &payload) {
-            id(mqtt_client).publish(device + "/status/ack",
-              std::string("{\"ok\":true,\"action\":\"reboot\",\"detail\":\"rebooting\"}"), 0, false);
-            esphome::delay(500);
-            App.safe_reboot();
-          }, 0);
-    - delay: 5000ms
-    - lambda: |-
-        std::string device(App.get_name().c_str());
-        bool boot_ok = id(mqtt_client).publish("spa/status/boot",
-          std::string("{\"device_id\":\"") + device +
-          std::string("\",\"fw_version\":\"${version}\",\"event\":\"boot\"}"), 1, true);
-        if (boot_ok) {
-          ESP_LOGI("mqtt_boot", "Published boot event to spa/status/boot for %s", device.c_str());
-        } else {
-          ESP_LOGW("mqtt_boot", "Failed to publish boot event to spa/status/boot after connect delay");
-        }
 
 external_components:
   - source: esp32-spa
@@ -119,11 +57,6 @@ text_sensor:
     parent_id: display_handler
     type: error_code
     name: "Spa Error Code"
-  - platform: inputs
-    parent_id: display_handler
-    type: raw_frame
-    name: "Spa Raw Frame"
-    id: spa_raw_frame
 
 # ===== HOT TUB DISPLAY INPUTS =====
 sensor:

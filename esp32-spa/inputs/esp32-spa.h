@@ -39,11 +39,10 @@ namespace esp32_spa {
 class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::Sensor {
  public:
   // ---- Shared with ISR ----
-  volatile uint64_t shift_reg = 0;  // in-progress frame bits (up to 64 bits)
+  volatile uint32_t shift_reg = 0;
   volatile uint8_t bit_count = 0;
   volatile bool frame_ready = false;
-  // Frame boundary is detected purely by inter-frame gap (not a fixed bit count),
-  // so any frame length up to 64 bits is handled correctly.
+  // Note: removed time-based gap detection in ISR to avoid calling non-IRAM functions from ISR
 
   // ---- Publish control ----
   uint32_t last_publish_time = 0;
@@ -126,179 +125,6 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
   void set_heater_sensor(esphome::binary_sensor::BinarySensor *s) { heater_sensor_ = s; }
   void set_pump_sensor(esphome::binary_sensor::BinarySensor *s) { pump_sensor_ = s; }
   void set_light_sensor(esphome::binary_sensor::BinarySensor *s) { light_sensor_ = s; }
-
-  // Raw frame text sensor (publishes frame as binary string with bit-count prefix, e.g. "24:011011...")
-  esphome::text_sensor::TextSensor *raw_frame_sensor_ = nullptr;
-  void set_raw_frame_sensor(esphome::text_sensor::TextSensor *s) { raw_frame_sensor_ = s; }
-
-  struct DiscoverySample {
-    uint8_t bit_count;
-    uint64_t value;
-  };
-
-  struct DiscoveryPattern {
-    uint8_t bit_count = 0;
-    uint64_t value = 0;
-    uint16_t count = 0;
-  };
-
-  static constexpr uint8_t DISCOVERY_WINDOW_FRAMES = 100;
-  static constexpr uint8_t DISCOVERY_PATTERN_SLOTS = 48;  // enough slots for all unique patterns in a 100-frame window
-  static constexpr uint8_t DISCOVERY_LOG_INTERVAL = 100;  // one summary per full window rotation
-
-  DiscoverySample discovery_window_[DISCOVERY_WINDOW_FRAMES] = {};
-  DiscoveryPattern discovery_patterns_[DISCOVERY_PATTERN_SLOTS] = {};
-  uint16_t discovery_window_size_ = 0;
-  uint16_t discovery_window_pos_ = 0;
-  uint16_t discovery_length_hist_[65] = {};
-  uint32_t discovery_frame_seq_ = 0;
-  uint32_t discovery_last_summary_seq_ = 0;
-
-  void discovery_add_pattern(uint8_t bit_count, uint64_t value) {
-    int free_slot = -1;
-    int weakest_slot = 0;
-    uint16_t weakest_count = 0xFFFF;
-
-    for (uint8_t i = 0; i < DISCOVERY_PATTERN_SLOTS; ++i) {
-      auto &slot = discovery_patterns_[i];
-      if (slot.count == 0) {
-        if (free_slot < 0) free_slot = i;
-        continue;
-      }
-      if (slot.bit_count == bit_count && slot.value == value) {
-        slot.count++;
-        return;
-      }
-      if (slot.count < weakest_count) {
-        weakest_count = slot.count;
-        weakest_slot = i;
-      }
-    }
-
-    int target = free_slot >= 0 ? free_slot : weakest_slot;
-    discovery_patterns_[target].bit_count = bit_count;
-    discovery_patterns_[target].value = value;
-    discovery_patterns_[target].count = 1;
-  }
-
-  void discovery_remove_pattern(uint8_t bit_count, uint64_t value) {
-    for (uint8_t i = 0; i < DISCOVERY_PATTERN_SLOTS; ++i) {
-      auto &slot = discovery_patterns_[i];
-      if (slot.count > 0 && slot.bit_count == bit_count && slot.value == value) {
-        if (--slot.count == 0) {
-          slot.bit_count = 0;
-          slot.value = 0;
-        }
-        return;
-      }
-    }
-  }
-
-  void discovery_log_summary() {
-    if (discovery_window_size_ == 0) return;
-
-    uint8_t top_length[3] = {0, 0, 0};
-    uint16_t top_length_count[3] = {0, 0, 0};
-    for (uint8_t bits = 0; bits <= 64; ++bits) {
-      uint16_t count = discovery_length_hist_[bits];
-      if (count == 0) continue;
-      for (uint8_t i = 0; i < 3; ++i) {
-        if (count > top_length_count[i]) {
-          for (uint8_t j = 2; j > i; --j) {
-            top_length_count[j] = top_length_count[j - 1];
-            top_length[j] = top_length[j - 1];
-          }
-          top_length_count[i] = count;
-          top_length[i] = bits;
-          break;
-        }
-      }
-    }
-
-    uint8_t top_slot[3] = {255, 255, 255};
-    uint16_t top_count[3] = {0, 0, 0};
-    for (uint8_t i = 0; i < DISCOVERY_PATTERN_SLOTS; ++i) {
-      const auto &slot = discovery_patterns_[i];
-      if (slot.count == 0) continue;
-      for (uint8_t j = 0; j < 3; ++j) {
-        if (slot.count > top_count[j]) {
-          for (uint8_t k = 2; k > j; --k) {
-            top_count[k] = top_count[k - 1];
-            top_slot[k] = top_slot[k - 1];
-          }
-          top_count[j] = slot.count;
-          top_slot[j] = i;
-          break;
-        }
-      }
-    }
-
-    char message[512];
-    size_t pos = 0;
-    pos += snprintf(message + pos, sizeof(message) - pos,
-      "Discovery window seq=%u frames=%u lengths:",
-      static_cast<unsigned>(discovery_frame_seq_), static_cast<unsigned>(discovery_window_size_));
-
-    for (uint8_t i = 0; i < 3; ++i) {
-      if (top_length_count[i] == 0) continue;
-      pos += snprintf(message + pos, sizeof(message) - pos,
-        " %u=%u", static_cast<unsigned>(top_length[i]), static_cast<unsigned>(top_length_count[i]));
-    }
-
-    pos += snprintf(message + pos, sizeof(message) - pos, " patterns:");
-
-    for (uint8_t i = 0; i < 3; ++i) {
-      if (top_slot[i] == 255) continue;
-      const auto &slot = discovery_patterns_[top_slot[i]];
-      char bits[68];  // 64 bits + '\0' + margin
-      size_t bit_pos = 0;
-      for (int b = slot.bit_count - 1; b >= 0 && bit_pos + 1 < sizeof(bits); --b) {
-        bits[bit_pos++] = ((slot.value >> b) & 1ULL) ? '1' : '0';
-      }
-      bits[bit_pos] = '\0';
-      pos += snprintf(message + pos, sizeof(message) - pos,
-        " %u:%s x%u", static_cast<unsigned>(slot.bit_count), bits, static_cast<unsigned>(slot.count));
-    }
-
-    ESP_LOGI(TAG, "%s", message);
-  }
-
-  void discovery_record_frame(uint8_t bit_count, uint64_t value) {
-    discovery_frame_seq_++;
-
-    if (bit_count <= 64) {
-      discovery_length_hist_[bit_count]++;
-    }
-
-    if (discovery_window_size_ == DISCOVERY_WINDOW_FRAMES) {
-      const auto &oldest = discovery_window_[discovery_window_pos_];
-      if (oldest.bit_count <= 64 && discovery_length_hist_[oldest.bit_count] > 0) {
-        discovery_length_hist_[oldest.bit_count]--;
-      }
-      discovery_remove_pattern(oldest.bit_count, oldest.value);
-    } else {
-      discovery_window_size_++;
-    }
-
-    discovery_window_[discovery_window_pos_] = {bit_count, value};
-    discovery_window_pos_ = static_cast<uint16_t>((discovery_window_pos_ + 1) % DISCOVERY_WINDOW_FRAMES);
-    discovery_add_pattern(bit_count, value);
-
-    if (discovery_window_size_ == DISCOVERY_WINDOW_FRAMES &&
-        (discovery_frame_seq_ - discovery_last_summary_seq_) >= DISCOVERY_LOG_INTERVAL) {
-      discovery_log_summary();
-      discovery_last_summary_seq_ = discovery_frame_seq_;
-    }
-  }
-
-  static void append_bits(char *buffer, size_t buffer_size, uint64_t value, uint8_t bit_count) {
-    if (buffer_size == 0) return;
-    size_t pos = 0;
-    for (int bit = bit_count - 1; bit >= 0 && pos + 1 < buffer_size; --bit) {
-      buffer[pos++] = ((value >> bit) & 1ULL) ? '1' : '0';
-    }
-    buffer[pos] = '\0';
-  }
 
 
 
@@ -442,7 +268,7 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
     }
     portEXIT_CRITICAL(&spinlock_);
     if (partials > 0) {
-      ESP_LOGW(TAG, "Dropped %u spurious gaps (clock edges with no accumulated bits)", partials);
+      ESP_LOGW(TAG, "Dropped %u partial/incomplete frames (gaps before 24 bits)", partials);
     }
 
     // If no new frame, allow heartbeat publishes of last known value (only if last frame was valid)
@@ -502,6 +328,8 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
         return;
       }
 
+      uint8_t seg_b = (p1 >> 5) & 0x1;
+      uint8_t seg_c = (p1 >> 4) & 0x1;
       int8_t digit2 = decode_7seg(p2);
       int8_t digit3 = decode_7seg(p3);
 
@@ -557,32 +385,12 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
 
     // Copy shared data under spinlock to avoid races with ISR
     portENTER_CRITICAL(&spinlock_);
-    uint64_t value = completed_frame;
-    uint8_t  n_bits = completed_bit_count;
+    uint32_t value = shift_reg;
     frame_ready = false;
     portEXIT_CRITICAL(&spinlock_);
 
-    discovery_record_frame(n_bits, value);
-
-    // Publish every observed frame so discovery tooling can count repeats and cluster by length.
-    if (raw_frame_sensor_) {
-      char bits[128];
-      size_t pos = 0;
-      int written = snprintf(bits + pos, sizeof(bits) - pos, "%u|%u:",
-        static_cast<unsigned>(discovery_frame_seq_), static_cast<unsigned>(n_bits));
-      if (written > 0) pos += static_cast<size_t>(written);
-      append_bits(bits + pos, sizeof(bits) - pos, value, n_bits);
-      raw_frame_sensor_->publish_state(std::string(bits));
-    }
-
-    // For protocol discovery, only keep the legacy temperature/state decoder when the frame is 24 bits.
-    if (n_bits != 24) {
-      last_frame_valid = false;
-      return;
-    }
-
-    // Decode the frame using the lower 24 bits for GS100-compatible decoding.
-    uint32_t out = static_cast<uint32_t>(value) & 0xFFFFFF;
+    // Decode the frame and detect changes using decoded digits (not raw 24-bit value)
+    uint32_t out = value & 0xFFFFFF;
 
     // Split into parts
     uint8_t p1 = (out >> 17) & 0x7F;  // top 7 bits
@@ -824,6 +632,8 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
       if (heater_sensor_) { heater_sensor_->publish_state(static_cast<bool>(pub_heater)); last_heater = pub_heater; }
       if (pump_sensor_) { pump_sensor_->publish_state(static_cast<bool>(pub_pump)); last_pump = pub_pump; }
       if (light_sensor_) { light_sensor_->publish_state(static_cast<bool>(pub_light)); last_light = pub_light; }
+      
+      ESP_LOGD(TAG, "Binary sensors updated: heater=%d pump=%d light=%d", pub_heater, pub_pump, pub_light);
 
       last_published_value = value;
       last_publish_time = now;
@@ -850,12 +660,7 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
   // We avoid esp_timer_get_time() in ISR; use CPU cycle count and a fixed NOP delay to sample later.
   volatile uint32_t last_clock_ccount = 0;  // low-overhead 32-bit cycle counter (wraps naturally)
 
-  // Completed frame buffer (written by ISR on gap, read by loop()).
-  // uint64_t supports up to 64 bits; actual bit count is stored separately.
-  volatile uint64_t completed_frame = 0;
-  volatile uint8_t  completed_bit_count = 0;
-
-  // Count partial/incomplete frames detected by ISR (incremented when a gap resets a 0-bit frame)
+  // Count partial/incomplete frames detected by ISR (incremented when a gap resets a non-24-bit frame)
   volatile uint32_t partial_frame_count = 0;
 
   // CPU frequency assumptions and derived constants for timing
@@ -878,44 +683,45 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
   // Removed C++ static wrapper to avoid relocation/linker issues. A plain C ISR wrapper is defined at global scope.
 
   void IRAM_ATTR on_clock_edge_isr() {
-    // ISR: frame boundary is the inter-frame gap, not a fixed bit count.
-    // On a gap: commit whatever was accumulated as a completed frame, then start fresh.
-    // This correctly handles any frame length up to 64 bits.
+    // ISR: detect frame gap by measuring cycles since last clock edge using CPU ccount
+    // If gap > FRAME_GAP_CYCLES we treat as new frame and reset bit counter.
 
     portENTER_CRITICAL_ISR(&spinlock_);
 
     uint32_t now_ccount = get_cycle_count();
     if (last_clock_ccount != 0 && (now_ccount - last_clock_ccount) > FRAME_GAP_CYCLES) {
-      if (bit_count > 0) {
-        // Commit the accumulated frame
-        completed_frame = shift_reg;
-        completed_bit_count = bit_count;
-        frame_ready = true;
-      } else {
-        // Gap with no bits — spurious gap, ignore
+      // Detected frame gap — if we had a partial frame (bit_count != 0 and != 24), count it
+      if (bit_count != 0 && bit_count != 24) {
         partial_frame_count++;
       }
+      // Start a new frame
       shift_reg = 0;
       bit_count = 0;
+      // Optional debug: keep ISR short
     }
     last_clock_ccount = now_ccount;
 
-    // Exit critical before busy-wait to minimise ISR latency impact on other interrupts
+    // Record start and exit critical to minimize time interrupts are disabled
     uint32_t start_ccount = now_ccount;
     portEXIT_CRITICAL_ISR(&spinlock_);
 
-    // Busy-wait for data line to settle
+    // Busy-wait using cycle count to let the data line settle (more accurate than counting NOPs)
     while ((get_cycle_count() - start_ccount) < SAMPLE_DELAY_CYCLES) {
       asm volatile ("nop");
     }
 
+    // Re-enter critical briefly to sample DATA and update shared state
     portENTER_CRITICAL_ISR(&spinlock_);
     bool bit = gpio_get_level((gpio_num_t)DATA_PIN);
-    // Cap at 64 bits to avoid overflow; extra bits are silently dropped
-    if (bit_count < 64) {
-      shift_reg = (shift_reg << 1) | static_cast<uint64_t>(bit);
-      bit_count++;
+
+    shift_reg = (shift_reg << 1) | static_cast<uint32_t>(bit);
+    bit_count++;
+
+    if (bit_count == 24) {
+      frame_ready = true;
+      bit_count = 0;
     }
+
     portEXIT_CRITICAL_ISR(&spinlock_);
   }
 };
