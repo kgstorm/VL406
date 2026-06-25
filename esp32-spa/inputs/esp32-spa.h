@@ -139,13 +139,20 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
     portENTER_CRITICAL(&spinlock_);
     uint64_t val = completed_frame;
     uint8_t  n   = completed_bit_count;
+    uint64_t pval = last_partial_frame_;
+    uint8_t  pn   = last_partial_bit_count_;
     uint16_t gaps[24];
-    for (uint8_t i = 0; i < 24; ++i) gaps[i] = completed_gaps_[i];
+    uint16_t pgaps[24];
+    for (uint8_t i = 0; i < 24; ++i) { gaps[i] = completed_gaps_[i]; pgaps[i] = last_partial_gaps_[i]; }
     portEXIT_CRITICAL(&spinlock_);
-    if (n == 0) return "no_frame";
-    // "24:" + 24 × (5-digit gap + ":" + "0"/"1" + ",") = 3 + 24*8 = 195 chars + null
-    char buf[220];
+    if (n == 0 && pn == 0) return "no_frame";
+    // If no completed frame but we have a partial, report it with a prefix
+    bool use_partial = (n == 0);
+    if (use_partial) { val = pval; n = pn; for (uint8_t i = 0; i < 24; ++i) gaps[i] = pgaps[i]; }
+    // prefix:n_bits:gap:bit,gap:bit,...
+    char buf[230];
     uint8_t pos = 0;
+    if (use_partial) pos += snprintf(buf + pos, sizeof(buf) - pos, "partial:");
     pos += snprintf(buf + pos, sizeof(buf) - pos, "%u:", static_cast<unsigned>(n));
     for (int i = n - 1; i >= 0; --i) {
       uint8_t bit_val = (val >> i) & 1;
@@ -289,8 +296,10 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
 
     // Report any partial/incomplete frames detected by ISR since last check
     uint32_t partials = 0;
+    uint8_t  partial_bits = 0;
     portENTER_CRITICAL(&spinlock_);
     partials = partial_frame_count;
+    partial_bits = partial_frame_last_bits;
     partial_frame_count = 0;
     if (partials > 0) {
       // Invalidate stored frame here instead of inside ISR to keep ISR short and non-blocking
@@ -298,7 +307,7 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
     }
     portEXIT_CRITICAL(&spinlock_);
     if (partials > 0) {
-      ESP_LOGW(TAG, "Dropped %u spurious gaps (clock edges with no accumulated bits)", partials);
+      ESP_LOGW(TAG, "Dropped %u partial frame(s); last discarded frame had %u bits", partials, static_cast<unsigned>(partial_bits));
     }
 
     // If no new frame, allow heartbeat publishes of last known value (only if last frame was valid)
@@ -697,11 +706,18 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
   // Gap (µs) before each bit in the completed frame. Index 0 = gap before bit 0 (inter-frame gap).
   volatile uint16_t completed_gaps_[24] = {};
 
+  // Last discarded partial frame (written by ISR on gap-reset, read by get_raw_frame_string).
+  volatile uint64_t last_partial_frame_ = 0;
+  volatile uint8_t  last_partial_bit_count_ = 0;
+  volatile uint16_t last_partial_gaps_[24] = {};
+
   // In-progress gap accumulator (written by ISR, not read outside ISR)
   volatile uint16_t gap_buf_[24] = {};
 
   // Count partial/incomplete frames detected by ISR (incremented when a gap resets a 0-bit frame)
   volatile uint32_t partial_frame_count = 0;
+  // Bit count of the most-recently discarded partial frame (for diagnostics)
+  volatile uint8_t  partial_frame_last_bits = 0;
 
   // CPU frequency assumptions and derived constants for timing
   static constexpr uint32_t CPU_MHZ = 240u;                // ESP32 clock (MHz)
@@ -740,7 +756,11 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
 
     if (last_clock_ccount != 0 && gap_cycles > FRAME_GAP_CYCLES) {
       if (bit_count > 0) {
-        // Incomplete frame before gap — discard it
+        // Incomplete frame before gap — save for diagnostics then discard
+        last_partial_frame_ = shift_reg;
+        last_partial_bit_count_ = bit_count;
+        for (uint8_t i = 0; i < bit_count && i < 24; ++i) last_partial_gaps_[i] = gap_buf_[i];
+        partial_frame_last_bits = bit_count;
         partial_frame_count++;
         shift_reg = 0;
         bit_count = 0;

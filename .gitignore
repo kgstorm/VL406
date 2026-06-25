@@ -3,3 +3,4 @@
 secrets.yaml
 build/
 local/
+__pycache__/
