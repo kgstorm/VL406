@@ -1,6 +1,6 @@
 substitutions:
   UNITS: "F"  # F, or C
-  version: "1.2.2"  # overridden by CI on release
+  version: "1.2.5"  # overridden by CI on release
 
 esphome:
   name: vl406
@@ -89,7 +89,7 @@ mqtt:
 
         id(mqtt_client).subscribe("spa/" + device + "/cmd/raw_request",
           [device](const std::string &topic, const std::string &payload) {
-            id(mqtt_client).publish(device + "/status/raw", id(spa_raw_frame).state, 0, false);
+            id(mqtt_client).publish(device + "/status/raw", id(display_handler).get_raw_frame_string(), 0, false);
           }, 0);
 
         id(mqtt_client).subscribe("spa/" + device + "/cmd/reboot",

@@ -94,8 +94,10 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
   std::string candidate_error = ""; uint8_t stable_error = 0;
 
   static constexpr uint32_t HEARTBEAT_MS = 30000;  // heartbeat every 30s (publish if unchanged)
-  // Gap threshold (ms) to consider the start of a new frame (use ~15ms to match ~19ms observed gap)
-  static constexpr uint32_t FRAME_GAP_MS =5;
+  // Gap threshold to reset mid-frame accumulation. Must be:
+  //   > VL406 inter-packet gap (~8ms between packets 3 and 4)
+  //   < inter-frame gap (~19ms) — though that path is never triggered since we reset at 24 bits
+  static constexpr uint32_t FRAME_GAP_MS = 14;
   static constexpr uint32_t FRAME_GAP_US = FRAME_GAP_MS * 1000;
 
   // Stability filtering: require this many consecutive identical decoded frames before publishing
@@ -127,10 +129,32 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
   void set_pump_sensor(esphome::binary_sensor::BinarySensor *s) { pump_sensor_ = s; }
   void set_light_sensor(esphome::binary_sensor::BinarySensor *s) { light_sensor_ = s; }
 
-  // Raw frame text sensor (publishes frame as binary string with bit-count prefix, e.g. "24:011011...")
+  // Raw frame text sensor — updated only on demand via get_raw_frame_string() / MQTT raw_request
   esphome::text_sensor::TextSensor *raw_frame_sensor_ = nullptr;
-  uint64_t last_raw_frame_bits_ = UINT64_MAX;  // sentinel: no frame published yet
   void set_raw_frame_sensor(esphome::text_sensor::TextSensor *s) { raw_frame_sensor_ = s; }
+
+  // Returns the last completed 24-bit frame as "24:gap:bit,gap:bit,..." where gap is µs since
+  // the previous clock rise. Safe to call from main task/MQTT callback.
+  std::string get_raw_frame_string() {
+    portENTER_CRITICAL(&spinlock_);
+    uint64_t val = completed_frame;
+    uint8_t  n   = completed_bit_count;
+    uint16_t gaps[24];
+    for (uint8_t i = 0; i < 24; ++i) gaps[i] = completed_gaps_[i];
+    portEXIT_CRITICAL(&spinlock_);
+    if (n == 0) return "no_frame";
+    // "24:" + 24 × (5-digit gap + ":" + "0"/"1" + ",") = 3 + 24*8 = 195 chars + null
+    char buf[220];
+    uint8_t pos = 0;
+    pos += snprintf(buf + pos, sizeof(buf) - pos, "%u:", static_cast<unsigned>(n));
+    for (int i = n - 1; i >= 0; --i) {
+      uint8_t bit_val = (val >> i) & 1;
+      pos += snprintf(buf + pos, sizeof(buf) - pos, "%u:%u", static_cast<unsigned>(gaps[n - 1 - i]), static_cast<unsigned>(bit_val));
+      if (i > 0) buf[pos++] = ',';
+    }
+    buf[pos] = '\0';
+    return std::string(buf);
+  }
 
 
 
@@ -396,20 +420,7 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
     frame_ready = false;
     portEXIT_CRITICAL(&spinlock_);
 
-    // Publish raw frame as a binary string with actual bit count prepended, e.g. "24:011011001..."
-    // This works regardless of how many bits the device actually sends.
-    if (raw_frame_sensor_ && value != last_raw_frame_bits_) {
-      last_raw_frame_bits_ = value;
-      char bits[70];  // "64:" + 64 bits + null
-      uint8_t pos = 0;
-      pos += snprintf(bits + pos, sizeof(bits) - pos, "%u:", static_cast<unsigned>(n_bits));
-      for (int i = n_bits - 1; i >= 0; --i) bits[pos++] = ((value >> i) & 1) ? '1' : '0';
-      bits[pos] = '\0';
-      raw_frame_sensor_->publish_state(std::string(bits));
-    }
-
-    // Decode the frame using the lower 24 bits for GS100-compatible decoding.
-    // If the frame turns out to be a different length, the raw_frame sensor above will reveal it.
+    // Decode the frame using the lower 24 bits.
     uint32_t out = static_cast<uint32_t>(value) & 0xFFFFFF;
 
     // Split into parts
@@ -680,10 +691,14 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
   // We avoid esp_timer_get_time() in ISR; use CPU cycle count and a fixed NOP delay to sample later.
   volatile uint32_t last_clock_ccount = 0;  // low-overhead 32-bit cycle counter (wraps naturally)
 
-  // Completed frame buffer (written by ISR on gap, read by loop()).
-  // uint64_t supports up to 64 bits; actual bit count is stored separately.
+  // Completed frame buffer (written by ISR at bit 24, read by loop()).
   volatile uint64_t completed_frame = 0;
   volatile uint8_t  completed_bit_count = 0;
+  // Gap (µs) before each bit in the completed frame. Index 0 = gap before bit 0 (inter-frame gap).
+  volatile uint16_t completed_gaps_[24] = {};
+
+  // In-progress gap accumulator (written by ISR, not read outside ISR)
+  volatile uint16_t gap_buf_[24] = {};
 
   // Count partial/incomplete frames detected by ISR (incremented when a gap resets a 0-bit frame)
   volatile uint32_t partial_frame_count = 0;
@@ -708,25 +723,28 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
   // Removed C++ static wrapper to avoid relocation/linker issues. A plain C ISR wrapper is defined at global scope.
 
   void IRAM_ATTR on_clock_edge_isr() {
-    // ISR: frame boundary is the inter-frame gap, not a fixed bit count.
-    // On a gap: commit whatever was accumulated as a completed frame, then start fresh.
-    // This correctly handles any frame length up to 64 bits.
+    // ISR: commit frame at exactly 24 bits. The gap threshold is only a safety reset —
+    // it discards a partial accumulation if the clock is silent for > FRAME_GAP_MS.
+    // FRAME_GAP_MS (14ms) is above the VL406 inter-packet gap (~8ms) so that gap does
+    // not discard bits mid-frame. The real inter-frame gap (~19ms) arrives after we have
+    // already committed and reset at bit 24, so it only sees bit_count==0 and is a no-op.
 
     portENTER_CRITICAL_ISR(&spinlock_);
 
     uint32_t now_ccount = get_cycle_count();
-    if (last_clock_ccount != 0 && (now_ccount - last_clock_ccount) > FRAME_GAP_CYCLES) {
+
+    // Compute gap before updating last_clock_ccount — must happen here while the old value is valid.
+    uint32_t gap_cycles = (last_clock_ccount != 0) ? (now_ccount - last_clock_ccount) : 0;
+    uint16_t gap_us = static_cast<uint16_t>((gap_cycles / CYCLES_PER_US) > 0xFFFFu
+                        ? 0xFFFFu : (gap_cycles / CYCLES_PER_US));
+
+    if (last_clock_ccount != 0 && gap_cycles > FRAME_GAP_CYCLES) {
       if (bit_count > 0) {
-        // Commit the accumulated frame
-        completed_frame = shift_reg;
-        completed_bit_count = bit_count;
-        frame_ready = true;
-      } else {
-        // Gap with no bits — spurious gap, ignore
+        // Incomplete frame before gap — discard it
         partial_frame_count++;
+        shift_reg = 0;
+        bit_count = 0;
       }
-      shift_reg = 0;
-      bit_count = 0;
     }
     last_clock_ccount = now_ccount;
 
@@ -741,10 +759,18 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
 
     portENTER_CRITICAL_ISR(&spinlock_);
     bool bit = gpio_get_level((gpio_num_t)DATA_PIN);
-    // Cap at 64 bits to avoid overflow; extra bits are silently dropped
-    if (bit_count < 64) {
-      shift_reg = (shift_reg << 1) | static_cast<uint64_t>(bit);
-      bit_count++;
+    gap_buf_[bit_count] = gap_us;  // gap_us computed above, before last_clock_ccount was updated
+    shift_reg = (shift_reg << 1) | static_cast<uint64_t>(bit);
+    bit_count++;
+
+    if (bit_count == 24) {
+      // Full frame captured — commit and reset accumulator
+      completed_frame = shift_reg;
+      completed_bit_count = 24;
+      for (uint8_t i = 0; i < 24; ++i) completed_gaps_[i] = gap_buf_[i];
+      frame_ready = true;
+      shift_reg = 0;
+      bit_count = 0;
     }
     portEXIT_CRITICAL_ISR(&spinlock_);
   }
