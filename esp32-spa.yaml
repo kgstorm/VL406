@@ -71,14 +71,22 @@ sensor:
       name: "Spa Measured Temp"
       id: spa_measured_temp
       unit_of_measurement: "°C"
-      accuracy_decimals: 0
+      accuracy_decimals: 1
       device_class: temperature
+      filters:
+        - lambda: |-
+            if (id(display_is_fahrenheit)) return (x - 32.0f) * 5.0f / 9.0f;
+            return x;
     set_temp:
       name: "Spa Set Temp"
       id: spa_set_temp
       unit_of_measurement: "°C"
-      accuracy_decimals: 0
+      accuracy_decimals: 1
       device_class: temperature
+      filters:
+        - lambda: |-
+            if (id(display_is_fahrenheit)) return (x - 32.0f) * 5.0f / 9.0f;
+            return x;
 
 binary_sensor:
   - platform: inputs
@@ -106,10 +114,9 @@ select:
     restore_value: true
     optimistic: true
     on_value:
-      - lambda: |-
-          bool is_f = (x == "°F");
-          id(spa_measured_temp).set_unit_of_measurement(is_f ? "°F" : "°C");
-          id(spa_set_temp).set_unit_of_measurement(is_f ? "°F" : "°C");
+      - globals.set:
+          id: display_is_fahrenheit
+          value: !lambda 'return x == "°F";'
 
 # ===== BUTTONS (GPIO outputs) =====
 output:
