@@ -1,6 +1,5 @@
 substitutions:
-  UNITS: "F"  # F, or C
-  version: "1.2.6"  # overridden by CI on release
+  version: "1.3"
 
 esphome:
   name: vl406
@@ -49,67 +48,11 @@ http_request:
   buffer_size_tx: 1024
   redirect_limit: 5
 
-mqtt:
-  id: mqtt_client
-  broker: !secret mqtt_host
-  port: !secret mqtt_port
-  username: !secret mqtt_username
-  password: !secret mqtt_password
-  certificate_authority: !secret mqtt_ca_cert
-  discovery: false
-  topic_prefix: null
-  birth_message:
-  will_message:
-  shutdown_message:
-  log_topic:
-  on_connect:
-    - lambda: |-
-        std::string device(App.get_name().c_str());
-
-        // Subscribe to per-device command topics exactly once (guard against reconnects).
-        static bool subscribed = false;
-        if (subscribed) return;
-        subscribed = true;
-
-        id(mqtt_client).subscribe("spa/" + device + "/cmd/button",
-          [device](const std::string &topic, const std::string &payload) {
-            std::string btn = payload;
-            if (btn.rfind("button=", 0) == 0) btn = btn.substr(7);
-            bool ok = false;
-            if      (btn == "warm")  { id(btn_warm).press();  ok = true; }
-            else if (btn == "cool")  { id(btn_cool).press();  ok = true; }
-            else if (btn == "light") { id(btn_light).press(); ok = true; }
-            else if (btn == "pump")  { id(btn_pump).press();  ok = true; }
-            char ack[160];
-            snprintf(ack, sizeof(ack),
-              "{\"ok\":%s,\"action\":\"button\",\"detail\":\"%s\"}",
-              ok ? "true" : "false", btn.c_str());
-            id(mqtt_client).publish(device + "/status/ack", std::string(ack), 0, false);
-          }, 0);
-
-        id(mqtt_client).subscribe("spa/" + device + "/cmd/raw_request",
-          [device](const std::string &topic, const std::string &payload) {
-            id(mqtt_client).publish(device + "/status/raw", id(display_handler).get_raw_frame_string(), 0, false);
-          }, 0);
-
-        id(mqtt_client).subscribe("spa/" + device + "/cmd/reboot",
-          [device](const std::string &topic, const std::string &payload) {
-            id(mqtt_client).publish(device + "/status/ack",
-              std::string("{\"ok\":true,\"action\":\"reboot\",\"detail\":\"rebooting\"}"), 0, false);
-            esphome::delay(500);
-            App.safe_reboot();
-          }, 0);
-    - delay: 5000ms
-    - lambda: |-
-        std::string device(App.get_name().c_str());
-        bool boot_ok = id(mqtt_client).publish("spa/status/boot",
-          std::string("{\"device_id\":\"") + device +
-          std::string("\",\"fw_version\":\"${version}\",\"event\":\"boot\"}"), 1, true);
-        if (boot_ok) {
-          ESP_LOGI("mqtt_boot", "Published boot event to spa/status/boot for %s", device.c_str());
-        } else {
-          ESP_LOGW("mqtt_boot", "Failed to publish boot event to spa/status/boot after connect delay");
-        }
+globals:
+  - id: display_is_fahrenheit
+    type: bool
+    restore_value: true
+    initial_value: 'false'
 
 external_components:
   - source: esp32-spa
@@ -119,11 +62,6 @@ text_sensor:
     parent_id: display_handler
     type: error_code
     name: "Spa Error Code"
-  - platform: inputs
-    parent_id: display_handler
-    type: raw_frame
-    name: "Spa Raw Frame"
-    id: spa_raw_frame
 
 # ===== HOT TUB DISPLAY INPUTS =====
 sensor:
@@ -132,13 +70,13 @@ sensor:
     measured_temp:
       name: "Spa Measured Temp"
       id: spa_measured_temp
-      unit_of_measurement: "°${UNITS}"
+      unit_of_measurement: "°C"
       accuracy_decimals: 0
       device_class: temperature
     set_temp:
       name: "Spa Set Temp"
       id: spa_set_temp
-      unit_of_measurement: "°${UNITS}"
+      unit_of_measurement: "°C"
       accuracy_decimals: 0
       device_class: temperature
 
@@ -155,6 +93,23 @@ binary_sensor:
     parent_id: display_handler
     type: light
     name: "Spa Light Status"
+
+select:
+  - platform: template
+    name: "Spa Display Unit"
+    id: spa_display_unit
+    icon: "mdi:thermometer"
+    options:
+      - "°C"
+      - "°F"
+    initial_option: "°C"
+    restore_value: true
+    optimistic: true
+    on_value:
+      - lambda: |-
+          bool is_f = (x == "°F");
+          id(spa_measured_temp).set_unit_of_measurement(is_f ? "°F" : "°C");
+          id(spa_set_temp).set_unit_of_measurement(is_f ? "°F" : "°C");
 
 # ===== BUTTONS (GPIO outputs) =====
 output:

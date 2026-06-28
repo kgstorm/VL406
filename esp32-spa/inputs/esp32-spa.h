@@ -39,17 +39,19 @@ namespace esp32_spa {
 class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::Sensor {
  public:
   // ---- Shared with ISR ----
-  volatile uint64_t shift_reg = 0;  // in-progress frame bits (up to 64 bits)
+  volatile uint32_t shift_reg = 0;
   volatile uint8_t bit_count = 0;
   volatile bool frame_ready = false;
-  // Frame boundary is detected purely by inter-frame gap (not a fixed bit count),
-  // so any frame length up to 64 bits is handled correctly.
+  // Note: removed time-based gap detection in ISR to avoid calling non-IRAM functions from ISR
 
   // ---- Publish control ----
   uint32_t last_publish_time = 0;
   uint32_t last_published_value = 0;
+  uint8_t  last_published_bits = 24;
   bool first_publish = true;
   volatile bool last_frame_valid = false;  // becomes true when a frame passes the checksum and is published
+  volatile uint32_t completed_frame = 0;   // frame data saved by ISR pending loop() read
+  volatile uint8_t  completed_bits  = 0;   // bit count of completed_frame
 
   // Remember last decoded values for change detection
   int16_t last_measured_temp = -1;  // -1 = unknown
@@ -94,10 +96,8 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
   std::string candidate_error = ""; uint8_t stable_error = 0;
 
   static constexpr uint32_t HEARTBEAT_MS = 30000;  // heartbeat every 30s (publish if unchanged)
-  // Gap threshold to reset mid-frame accumulation. Must be:
-  //   > VL406 inter-packet gap (~8ms between packets 3 and 4)
-  //   < inter-frame gap (~19ms) — though that path is never triggered since we reset at 24 bits
-  static constexpr uint32_t FRAME_GAP_MS = 14;
+  // Gap threshold (ms) to consider the start of a new frame (use ~15ms to match ~19ms observed gap)
+  static constexpr uint32_t FRAME_GAP_MS =5;
   static constexpr uint32_t FRAME_GAP_US = FRAME_GAP_MS * 1000;
 
   // Stability filtering: require this many consecutive identical decoded frames before publishing
@@ -128,40 +128,6 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
   void set_heater_sensor(esphome::binary_sensor::BinarySensor *s) { heater_sensor_ = s; }
   void set_pump_sensor(esphome::binary_sensor::BinarySensor *s) { pump_sensor_ = s; }
   void set_light_sensor(esphome::binary_sensor::BinarySensor *s) { light_sensor_ = s; }
-
-  // Raw frame text sensor — updated only on demand via get_raw_frame_string() / MQTT raw_request
-  esphome::text_sensor::TextSensor *raw_frame_sensor_ = nullptr;
-  void set_raw_frame_sensor(esphome::text_sensor::TextSensor *s) { raw_frame_sensor_ = s; }
-
-  // Returns the last completed 24-bit frame as "24:gap:bit,gap:bit,..." where gap is µs since
-  // the previous clock rise. Safe to call from main task/MQTT callback.
-  std::string get_raw_frame_string() {
-    portENTER_CRITICAL(&spinlock_);
-    uint64_t val = completed_frame;
-    uint8_t  n   = completed_bit_count;
-    uint64_t pval = last_partial_frame_;
-    uint8_t  pn   = last_partial_bit_count_;
-    uint16_t gaps[24];
-    uint16_t pgaps[24];
-    for (uint8_t i = 0; i < 24; ++i) { gaps[i] = completed_gaps_[i]; pgaps[i] = last_partial_gaps_[i]; }
-    portEXIT_CRITICAL(&spinlock_);
-    if (n == 0 && pn == 0) return "no_frame";
-    // If no completed frame but we have a partial, report it with a prefix
-    bool use_partial = (n == 0);
-    if (use_partial) { val = pval; n = pn; for (uint8_t i = 0; i < 24; ++i) gaps[i] = pgaps[i]; }
-    // prefix:n_bits:gap:bit,gap:bit,...
-    char buf[230];
-    uint8_t pos = 0;
-    if (use_partial) pos += snprintf(buf + pos, sizeof(buf) - pos, "partial:");
-    pos += snprintf(buf + pos, sizeof(buf) - pos, "%u:", static_cast<unsigned>(n));
-    for (int i = n - 1; i >= 0; --i) {
-      uint8_t bit_val = (val >> i) & 1;
-      pos += snprintf(buf + pos, sizeof(buf) - pos, "%u:%u", static_cast<unsigned>(gaps[n - 1 - i]), static_cast<unsigned>(bit_val));
-      if (i > 0) buf[pos++] = ',';
-    }
-    buf[pos] = '\0';
-    return std::string(buf);
-  }
 
 
 
@@ -296,10 +262,8 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
 
     // Report any partial/incomplete frames detected by ISR since last check
     uint32_t partials = 0;
-    uint8_t  partial_bits = 0;
     portENTER_CRITICAL(&spinlock_);
     partials = partial_frame_count;
-    partial_bits = partial_frame_last_bits;
     partial_frame_count = 0;
     if (partials > 0) {
       // Invalidate stored frame here instead of inside ISR to keep ISR short and non-blocking
@@ -307,7 +271,7 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
     }
     portEXIT_CRITICAL(&spinlock_);
     if (partials > 0) {
-      ESP_LOGW(TAG, "Dropped %u partial frame(s); last discarded frame had %u bits", partials, static_cast<unsigned>(partial_bits));
+      ESP_LOGW(TAG, "Dropped %u partial/incomplete frames (gaps before 21 bits)", partials);
     }
 
     // If no new frame, allow heartbeat publishes of last known value (only if last frame was valid)
@@ -348,22 +312,21 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
         return;
       }
 
-      uint32_t out = last_published_value & 0xFFFFFF;
+      uint32_t out   = last_published_value;
+      uint8_t  hbits = last_published_bits;
 
-      uint8_t p1 = (out >> 17) & 0x7F;  // top 7 bits
-      uint8_t p2 = (out >> 10) & 0x7F;  // next 7 bits
-      uint8_t p3 = (out >> 3)  & 0x7F;  // next 7 bits
-      uint8_t p4 = out & 0x7;          // last 3 bits
+      uint8_t p1 = (out >> (hbits - 7))  & 0x7F;
+      uint8_t p2 = (out >> (hbits - 14)) & 0x7F;
+      uint8_t p3 = (out >> (hbits - 21)) & 0x7F;
+      uint8_t p4 = (hbits >= 24) ? ((out >> (hbits - 24)) & 0x7) : 0;
 
-      // Decode/validate exactly like new frames
-      // Require p1 to match pattern 0xx0x00 (bits 6,3,1,0 must be zero)
-      // AND require the least-significant bit of p4 to be 0 (LSB of status nibble)
-      const uint8_t checksum_mask = 0x4B;  // 0b1001011 (mask bits 6,3,1,0)
-      const uint8_t checksum_val  = 0x00;  // expected zeros in masked bits
-      const uint8_t p4_mask = 0x1;        // require p4 LSB == 0
-      if ((p1 & checksum_mask) != checksum_val || (p4 & p4_mask) != 0) {
-        ESP_LOGW(TAG, "Heartbeat: stored frame fails checksum (p1 masked=0x%02X expected=0x%02X, p4_lsb=0x%X expected=0x0), not publishing",
-                static_cast<unsigned>(p1 & checksum_mask), static_cast<unsigned>(checksum_val), static_cast<unsigned>(p4 & p4_mask));
+      // Validate exactly like new frames
+      const uint8_t checksum_mask = 0x4B;
+      const uint8_t checksum_val  = 0x00;
+      if ((p1 & checksum_mask) != checksum_val ||
+          (hbits >= 24 && (p4 & 0x1) != 0)) {
+        ESP_LOGW(TAG, "Heartbeat: stored frame fails checksum (p1 masked=0x%02X, p4_lsb=0x%X, hbits=%u), not publishing",
+                static_cast<unsigned>(p1 & checksum_mask), static_cast<unsigned>(p4 & 0x1), static_cast<unsigned>(hbits));
         return;
       }
 
@@ -424,34 +387,37 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
 
     // Copy shared data under spinlock to avoid races with ISR
     portENTER_CRITICAL(&spinlock_);
-    uint64_t value = completed_frame;
-    uint8_t  n_bits = completed_bit_count;
+    uint32_t value = completed_frame;
+    uint8_t  nbits = completed_bits;
     frame_ready = false;
     portEXIT_CRITICAL(&spinlock_);
 
-    // Decode the frame using the lower 24 bits.
-    uint32_t out = static_cast<uint32_t>(value) & 0xFFFFFF;
+    // Decode the frame: p1/p2/p3 are the top 21 bits (3 × 7-bit segments);
+    // p4 (status bits) only exists when nbits >= 24.
+    uint8_t p1 = (value >> (nbits - 7))  & 0x7F;
+    uint8_t p2 = (value >> (nbits - 14)) & 0x7F;
+    uint8_t p3 = (value >> (nbits - 21)) & 0x7F;
+    uint8_t p4 = (nbits >= 24) ? ((value >> (nbits - 24)) & 0x7) : 0;
 
-    // Split into parts
-    uint8_t p1 = (out >> 17) & 0x7F;  // top 7 bits
-    uint8_t p2 = (out >> 10) & 0x7F;  // next 7 bits
-    uint8_t p3 = (out >> 3)  & 0x7F;  // next 7 bits
-    uint8_t p4 = out & 0x7;          // last 3 bits
-
-    // Verify checksum to filter invalid frames
-    const uint8_t checksum_mask = 0x4B;  // 0b1001011 (mask bits 6,3,1,0)
-    const uint8_t checksum_val  = 0x00;  // expected zeros in masked bits
-    const uint8_t p4_mask = 0x1;        // require p4 LSB == 0
-    if ((p1 & checksum_mask) != checksum_val || (p4 & p4_mask) != 0) {
-      ESP_LOGW(TAG, "Frame fails checksum (p1 masked=0x%02X expected=0x%02X, p4_lsb=0x%X), ignoring",
-                static_cast<unsigned>(p1 & checksum_mask), static_cast<unsigned>(checksum_val), static_cast<unsigned>(p4 & p4_mask));
-      // Treat as non-existent frame
+    // Verify p1 checksum (always applied)
+    const uint8_t checksum_mask = 0x4B;  // 0b1001011 (mask bits 6,3,1,0 of p1)
+    const uint8_t checksum_val  = 0x00;
+    if ((p1 & checksum_mask) != checksum_val) {
+      ESP_LOGW(TAG, "Frame fails p1 checksum (p1 masked=0x%02X expected=0x%02X, nbits=%u), ignoring",
+                static_cast<unsigned>(p1 & checksum_mask), static_cast<unsigned>(checksum_val), static_cast<unsigned>(nbits));
+      last_frame_valid = false;
+      return;
+    }
+    // p4 LSB checksum only applies when the frame is long enough to include p4
+    if (nbits >= 24 && (p4 & 0x1) != 0) {
+      ESP_LOGW(TAG, "Frame fails p4 checksum (p4_lsb=0x%X, nbits=%u), ignoring",
+                static_cast<unsigned>(p4 & 0x1), static_cast<unsigned>(nbits));
       last_frame_valid = false;
       return;
     }
 
     // Small debug: log raw frame and parts
-    ESP_LOGD(TAG, "Frame received raw=0x%06X p1=0x%02X p2=0x%02X p3=0x%02X p4=0x%X", out, static_cast<unsigned>(p1), static_cast<unsigned>(p2), static_cast<unsigned>(p3), static_cast<unsigned>(p4));
+    ESP_LOGD(TAG, "Frame received raw=0x%06X bits=%u p1=0x%02X p2=0x%02X p3=0x%02X p4=0x%X", value, static_cast<unsigned>(nbits), static_cast<unsigned>(p1), static_cast<unsigned>(p2), static_cast<unsigned>(p3), static_cast<unsigned>(p4));
 
     // Decode the 7-seg patterns to digits
     int8_t digit2 = decode_7seg(p2);
@@ -676,6 +642,7 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
       ESP_LOGD(TAG, "Binary sensors updated: heater=%d pump=%d light=%d", pub_heater, pub_pump, pub_light);
 
       last_published_value = value;
+      last_published_bits  = nbits;
       last_publish_time = now;
       first_publish = false;
       portENTER_CRITICAL(&spinlock_);
@@ -700,24 +667,8 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
   // We avoid esp_timer_get_time() in ISR; use CPU cycle count and a fixed NOP delay to sample later.
   volatile uint32_t last_clock_ccount = 0;  // low-overhead 32-bit cycle counter (wraps naturally)
 
-  // Completed frame buffer (written by ISR at bit 24, read by loop()).
-  volatile uint64_t completed_frame = 0;
-  volatile uint8_t  completed_bit_count = 0;
-  // Gap (µs) before each bit in the completed frame. Index 0 = gap before bit 0 (inter-frame gap).
-  volatile uint16_t completed_gaps_[24] = {};
-
-  // Last discarded partial frame (written by ISR on gap-reset, read by get_raw_frame_string).
-  volatile uint64_t last_partial_frame_ = 0;
-  volatile uint8_t  last_partial_bit_count_ = 0;
-  volatile uint16_t last_partial_gaps_[24] = {};
-
-  // In-progress gap accumulator (written by ISR, not read outside ISR)
-  volatile uint16_t gap_buf_[24] = {};
-
-  // Count partial/incomplete frames detected by ISR (incremented when a gap resets a 0-bit frame)
+  // Count partial/incomplete frames detected by ISR (incremented when a gap resets a non-24-bit frame)
   volatile uint32_t partial_frame_count = 0;
-  // Bit count of the most-recently discarded partial frame (for diagnostics)
-  volatile uint8_t  partial_frame_last_bits = 0;
 
   // CPU frequency assumptions and derived constants for timing
   static constexpr uint32_t CPU_MHZ = 240u;                // ESP32 clock (MHz)
@@ -739,59 +690,51 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
   // Removed C++ static wrapper to avoid relocation/linker issues. A plain C ISR wrapper is defined at global scope.
 
   void IRAM_ATTR on_clock_edge_isr() {
-    // ISR: commit frame at exactly 24 bits. The gap threshold is only a safety reset —
-    // it discards a partial accumulation if the clock is silent for > FRAME_GAP_MS.
-    // FRAME_GAP_MS (14ms) is above the VL406 inter-packet gap (~8ms) so that gap does
-    // not discard bits mid-frame. The real inter-frame gap (~19ms) arrives after we have
-    // already committed and reset at bit 24, so it only sees bit_count==0 and is a no-op.
+    // ISR: detect frame gap by measuring cycles since last clock edge using CPU ccount
+    // If gap > FRAME_GAP_CYCLES we treat as new frame and reset bit counter.
 
     portENTER_CRITICAL_ISR(&spinlock_);
 
     uint32_t now_ccount = get_cycle_count();
-
-    // Compute gap before updating last_clock_ccount — must happen here while the old value is valid.
-    uint32_t gap_cycles = (last_clock_ccount != 0) ? (now_ccount - last_clock_ccount) : 0;
-    uint16_t gap_us = static_cast<uint16_t>((gap_cycles / CYCLES_PER_US) > 0xFFFFu
-                        ? 0xFFFFu : (gap_cycles / CYCLES_PER_US));
-
-    if (last_clock_ccount != 0 && gap_cycles > FRAME_GAP_CYCLES) {
-      if (bit_count > 0) {
-        // Incomplete frame before gap — save for diagnostics then discard
-        last_partial_frame_ = shift_reg;
-        last_partial_bit_count_ = bit_count;
-        for (uint8_t i = 0; i < bit_count && i < 24; ++i) last_partial_gaps_[i] = gap_buf_[i];
-        partial_frame_last_bits = bit_count;
+    if (last_clock_ccount != 0 && (now_ccount - last_clock_ccount) > FRAME_GAP_CYCLES) {
+      // Detected frame gap — save frame if it has enough bits, otherwise count as partial
+      if (bit_count >= 21) {
+        completed_frame = shift_reg;
+        completed_bits  = bit_count;
+        frame_ready     = true;
+      } else if (bit_count > 0) {
         partial_frame_count++;
-        shift_reg = 0;
-        bit_count = 0;
       }
+      // Start a new frame
+      shift_reg = 0;
+      bit_count = 0;
     }
     last_clock_ccount = now_ccount;
 
-    // Exit critical before busy-wait to minimise ISR latency impact on other interrupts
+    // Record start and exit critical to minimize time interrupts are disabled
     uint32_t start_ccount = now_ccount;
     portEXIT_CRITICAL_ISR(&spinlock_);
 
-    // Busy-wait for data line to settle
+    // Busy-wait using cycle count to let the data line settle (more accurate than counting NOPs)
     while ((get_cycle_count() - start_ccount) < SAMPLE_DELAY_CYCLES) {
       asm volatile ("nop");
     }
 
+    // Re-enter critical briefly to sample DATA and update shared state
     portENTER_CRITICAL_ISR(&spinlock_);
     bool bit = gpio_get_level((gpio_num_t)DATA_PIN);
-    gap_buf_[bit_count] = gap_us;  // gap_us computed above, before last_clock_ccount was updated
-    shift_reg = (shift_reg << 1) | static_cast<uint64_t>(bit);
+
+    shift_reg = (shift_reg << 1) | static_cast<uint32_t>(bit);
     bit_count++;
 
     if (bit_count == 24) {
-      // Full frame captured — commit and reset accumulator
       completed_frame = shift_reg;
-      completed_bit_count = 24;
-      for (uint8_t i = 0; i < 24; ++i) completed_gaps_[i] = gap_buf_[i];
-      frame_ready = true;
-      shift_reg = 0;
-      bit_count = 0;
+      completed_bits  = 24;
+      frame_ready     = true;
+      shift_reg       = 0;
+      bit_count       = 0;
     }
+
     portEXIT_CRITICAL_ISR(&spinlock_);
   }
 };
