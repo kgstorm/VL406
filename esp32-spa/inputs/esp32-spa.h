@@ -98,6 +98,13 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
   // Error code stability tracking
   std::string candidate_error = ""; uint8_t stable_error = 0;
 
+  // Spa mode text sensor (publishes "eco", "standard", or "sleep")
+  esphome::text_sensor::TextSensor *spa_mode_text_sensor_ = nullptr;
+  std::string last_mode_ = "";
+  std::string candidate_mode_ = "";
+  uint8_t stable_mode_ = 0;
+  static constexpr uint8_t MODE_STABLE_THRESHOLD = 3;
+
   static constexpr uint32_t HEARTBEAT_MS = 30000;  // heartbeat every 30s (publish if unchanged)
   // Gap threshold (ms) to consider the start of a new frame (use ~15ms to match ~19ms observed gap)
   static constexpr uint32_t FRAME_GAP_MS =5;
@@ -131,6 +138,7 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
   void set_heater_sensor(esphome::binary_sensor::BinarySensor *s) { heater_sensor_ = s; }
   void set_pump_sensor(esphome::binary_sensor::BinarySensor *s) { pump_sensor_ = s; }
   void set_light_sensor(esphome::binary_sensor::BinarySensor *s) { light_sensor_ = s; }
+  void set_spa_mode_text_sensor(esphome::text_sensor::TextSensor *s) { spa_mode_text_sensor_ = s; }
 
 
 
@@ -258,6 +266,13 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
     this->set_timeout("boot_press_cool_off", 1700, []() {
       gpio_set_level((gpio_num_t)PIN_WRITE_BTN2, 0);
     });
+    // Press LIGHTS ~600ms after the cool press to also capture the current heating mode on boot
+    this->set_timeout("boot_press_light_on",  2300, []() {
+      gpio_set_level((gpio_num_t)PIN_WRITE_BTN3, 1);
+    });
+    this->set_timeout("boot_press_light_off", 2500, []() {
+      gpio_set_level((gpio_num_t)PIN_WRITE_BTN3, 0);
+    });
   }
 
   void loop() override {
@@ -286,8 +301,11 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
         ESP_LOGI(TAG, "No set-temp captured for %ums — auto-pressing COOL to refresh set temp", static_cast<unsigned>(now - last_set_sent_time_ms));
         // Activate the physical COOL press (use balboa pin macro)
         gpio_set_level((gpio_num_t)PIN_WRITE_BTN2, 1);
-        // Ensure we release it after a short duration (mirror existing press timing)
+        // Release Cool after 200ms
         this->set_timeout("auto_press_cool", 200, [](){ gpio_set_level((gpio_num_t)PIN_WRITE_BTN2, 0); });
+        // 600ms after Cool press, press Lights once to also capture the current heating mode
+        this->set_timeout("auto_press_light_on",  600, []() { gpio_set_level((gpio_num_t)PIN_WRITE_BTN3, 1); });
+        this->set_timeout("auto_press_light_off", 800, []() { gpio_set_level((gpio_num_t)PIN_WRITE_BTN3, 0); });
         // Update timer to avoid repeated presses
         last_set_sent_time_ms = now;
         // Also reset heartbeat timing so we don't immediately publish stale data
@@ -308,8 +326,9 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
         if (heater_sensor_ && last_heater >= 0) { heater_sensor_->publish_state(static_cast<bool>(last_heater)); }
         if (seen_p4_ && pump_sensor_ && last_pump >= 0) { pump_sensor_->publish_state(static_cast<bool>(last_pump)); }
         if (seen_p4_ && light_sensor_ && last_light >= 0) { light_sensor_->publish_state(static_cast<bool>(last_light)); }
+        if (spa_mode_text_sensor_ && !last_mode_.empty()) { spa_mode_text_sensor_->publish_state(last_mode_); }
 
-        ESP_LOGI(TAG, "Heartbeat publish (stored): measured=%d set=%d heater=%d pump=%d light=%d", last_measured_temp, last_set_temp, last_heater, last_pump, last_light);
+        ESP_LOGI(TAG, "Heartbeat publish (stored): measured=%d set=%d heater=%d pump=%d light=%d mode=%s", last_measured_temp, last_set_temp, last_heater, last_pump, last_light, last_mode_.c_str());
 
         last_publish_time = now;
         return;
@@ -433,39 +452,85 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
     // Previously required decoded digits to be 0 too, but blank frames decode to -1 and were missed.
     bool is_zero = (p2 == 0x00 && p3 == 0x00);
 
-    // Stability update for zero detection
-    if (candidate_is_zero == is_zero) {
+    // Decode char patterns for mode/error detection
+    char c2_char = decode_7seg_char(p2);
+    char c3_char = decode_7seg_char(p3);
+
+    // Detect mode code strings shown during set-temp flash: St (Standard), Ec (Economy), SL (Sleep)
+    // These appear in place of the blank (0x00) during the set-temp flashing sequence when
+    // the user or firmware presses the Light button.
+    bool is_mode_string = (c2_char == 'S' && c3_char == 't') ||  // St / Std -> Standard
+                          (c2_char == 'E' && c3_char == 'c') ||  // Ec / Ecn -> Economy
+                          (c2_char == 'S' && c3_char == 'L');    // SL / Slp -> Sleep
+
+    // Treat blank (0x00) OR a mode string as a set-mode indicator for set-temp capture purposes
+    bool is_set_indicator = is_zero || is_mode_string;
+
+    // Stability update for set-indicator detection (replaces old zero-only tracking)
+    if (candidate_is_zero == is_set_indicator) {
       if (stable_zero < 255) stable_zero++;
     } else {
-      candidate_is_zero = is_zero;
+      candidate_is_zero = is_set_indicator;
       stable_zero = 1;
     }
 
     if (is_zero) {
       ESP_LOGD(TAG, "Zero raw detected: p2=0x%02X p3=0x%02X decoded d2=%d d3=%d", static_cast<unsigned>(p2), static_cast<unsigned>(p3), digit2, digit3);
     }
+    if (is_mode_string) {
+      ESP_LOGD(TAG, "Mode string detected: '%c%c' p2=0x%02X p3=0x%02X", c2_char, c3_char, static_cast<unsigned>(p2), static_cast<unsigned>(p3));
+    }
 
-    // Decode temperature if not zero
+    // Decode temperature if not a set indicator
     int16_t temp = -1;
-    if (!is_zero && digit2 >= 0 && digit3 >= 0) {
+    if (!is_set_indicator && digit2 >= 0 && digit3 >= 0) {
       temp = decode_temp(p1, digit2, digit3);
     }
 
-    // Decode/publish any error-code text (p2/p3) but only after it is stable and looks like an error
+    // Publish spa mode when a stable mode string is detected
+    if (is_mode_string) {
+      std::string mode_str;
+      if      (c2_char == 'E') mode_str = "eco";
+      else if (c2_char == 'S' && c3_char == 'L') mode_str = "sleep";
+      else                     mode_str = "standard";
+
+      if (candidate_mode_ == mode_str) { if (stable_mode_ < 255) stable_mode_++; }
+      else                             { candidate_mode_ = mode_str; stable_mode_ = 1; }
+
+      if (stable_mode_ >= MODE_STABLE_THRESHOLD && mode_str != last_mode_) {
+        last_mode_ = mode_str;
+        if (spa_mode_text_sensor_) spa_mode_text_sensor_->publish_state(last_mode_);
+        ESP_LOGI(TAG, "Spa mode published: %s", last_mode_.c_str());
+      }
+    } else if (temp >= 0) {
+      // Valid temperature visible -> normal/standard operation; publish standard if not already set
+      if (candidate_mode_ != "standard") { candidate_mode_ = "standard"; stable_mode_ = 1; }
+      else if (stable_mode_ < 255) stable_mode_++;
+
+      if (stable_mode_ >= MODE_STABLE_THRESHOLD && last_mode_ != "standard") {
+        last_mode_ = "standard";
+        if (spa_mode_text_sensor_) spa_mode_text_sensor_->publish_state(last_mode_);
+        ESP_LOGI(TAG, "Spa mode published: standard (normal operation)");
+      }
+    } else if (!is_set_indicator) {
+      // Unknown display state — reset mode candidate
+      candidate_mode_.clear(); stable_mode_ = 0;
+    }
+
+    // Decode/publish any error-code text (p2/p3) but only after it is stable and looks like an error.
+    // Mode strings (St/Ec/SL) are excluded here — they are handled by the mode sensor above.
     if (error_text_sensor_) {
-      // If the frame decodes to a numeric temperature, don't treat as an error
-      if (temp >= 0) {
+      // If numeric temperature or a mode string, don't treat as an error
+      if (temp >= 0 || is_mode_string) {
         candidate_error.clear(); stable_error = 0;
       } else {
-        char c2 = decode_7seg_char(p2);
-        char c3 = decode_7seg_char(p3);
         std::string code = "";
-        code.push_back(c2 != '\0' ? c2 : '?');
-        code.push_back(c3 != '\0' ? c3 : '?');
+        code.push_back(c2_char != '\0' ? c2_char : '?');
+        code.push_back(c3_char != '\0' ? c3_char : '?');
         const char *trans = translate_error_code(code);
 
         // Treat any decoded (non-blank) character sequence as a candidate error, or a known translation
-        if (trans != nullptr || (c2 != '\0' || c3 != '\0')) {
+        if (trans != nullptr || (c2_char != '\0' || c3_char != '\0')) {
           if (candidate_error == code) { if (stable_error < 255) stable_error++; } else { candidate_error = code; stable_error = 1; }
           if (stable_error >= ERROR_STABLE_THRESHOLD && code != last_error_code_) {
             if (trans) error_text_sensor_->publish_state(code + std::string(" - ") + trans);
@@ -496,9 +561,9 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
     bool zero_stable = (stable_zero >= STABLE_THRESHOLD);
     bool temp_stable = (stable_temp >= STABLE_THRESHOLD);
 
-    // Set mode logic: detect 0x00 alternation pattern
+    // Set mode logic: detect set-indicator alternation (blank 0x00 OR mode string)
     if (zero_stable && candidate_is_zero) {
-      // We just saw stable zeros - update last_zero_seen_time
+      // We just saw a stable set indicator - update last_zero_seen_time
       last_zero_seen_time = now;
 
       // If we saw a recent candidate temp (even just-before the zero), accept it as potential
@@ -531,7 +596,7 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
       ESP_LOGD(TAG, "Exited set mode (timeout)");
     }
 
-    // Publish set temp if we have a potential and see another zero
+    // Publish set temp if we have a potential and see another set indicator (blank or mode string)
     if (zero_stable && candidate_is_zero && set_temp_potential >= 0 && set_temp_potential != last_set_temp) {
       // Optional safety: ensure the candidate temp was seen recently (within 3s) to avoid stale data
       if (now - last_candidate_temp_time <= 3000) {
