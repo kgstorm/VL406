@@ -35,11 +35,6 @@ jobs:
           API_KEY: ${{ secrets.RELEASE_API_KEY }}
           OTA_PASSWORD: ${{ secrets.RELEASE_OTA_PASSWORD }}
           AP_PASSWORD: ${{ secrets.RELEASE_AP_PASSWORD }}
-          MQTT_HOST: ${{ secrets.RELEASE_MQTT_HOST }}
-          MQTT_PORT: ${{ secrets.RELEASE_MQTT_PORT }}
-          MQTT_USERNAME: ${{ secrets.RELEASE_MQTT_USERNAME }}
-          MQTT_PASSWORD: ${{ secrets.RELEASE_MQTT_PASSWORD }}
-          MQTT_CA_CERT: ${{ secrets.RELEASE_MQTT_CA_CERT }}
         run: |
           python3 - << 'PYEOF'
           import os
@@ -47,15 +42,7 @@ jobs:
               f'api_key: "{os.environ["API_KEY"]}"',
               f'ota_password: "{os.environ["OTA_PASSWORD"]}"',
               f'ap_password: "{os.environ["AP_PASSWORD"]}"',
-              f'mqtt_host: "{os.environ["MQTT_HOST"]}"',
-              f'mqtt_port: {os.environ["MQTT_PORT"]}',
-              f'mqtt_username: "{os.environ["MQTT_USERNAME"]}"',
-              f'mqtt_password: "{os.environ["MQTT_PASSWORD"]}"',
-              'mqtt_ca_cert: |',
           ]
-          # Indent the CA cert lines
-          for line in os.environ["MQTT_CA_CERT"].splitlines():
-              lines.append(f'  {line}')
           with open("secrets.yaml", "w") as f:
               f.write("\n".join(lines) + "\n")
           PYEOF
@@ -63,36 +50,40 @@ jobs:
       - name: Build firmware
         run: esphome -s version "${{ steps.version.outputs.VERSION }}" compile esp32-spa.yaml
 
-      - name: Locate firmware binary for OTA
-        id: firmware_ota
+      - name: Locate firmware binary
+        id: firmware
         run: |
           BIN=$(find .esphome/build -name "firmware.ota.bin" | head -1)
-          echo "Found OTA binary: $BIN"
+          echo "Found: $BIN"
           OUTNAME="vl406-${{ steps.version.outputs.VERSION }}.bin"
           cp "$BIN" "$OUTNAME"
           echo "FILENAME=$OUTNAME" >> $GITHUB_OUTPUT
 
       - name: Compute MD5
         id: md5
-        run: echo "MD5=$(md5sum ${{ steps.firmware_ota.outputs.FILENAME }} | cut -d' ' -f1)" >> $GITHUB_OUTPUT
+        run: echo "MD5=$(md5sum ${{ steps.firmware.outputs.FILENAME }} | cut -d' ' -f1)" >> $GITHUB_OUTPUT
           
       - name: Create GitHub Release and upload assets
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            ${{ steps.firmware_ota.outputs.FILENAME }}
+            ${{ steps.firmware.outputs.FILENAME }}
             dist/spa-control-card.js
           generate_release_notes: true
           name: "Release ${{ github.ref_name }}"
     
-      - name: Generate firmware manifest for GitHub Pages
+      - name: Update manifest.json
         run: |
           python3 - << 'PYEOF'
-          import json, os
+          import json, os, pathlib
 
           version = os.environ["VERSION"]
+          tag = os.environ["TAG"]
           md5 = os.environ["MD5"]
           filename = os.environ["FILENAME"]
+          repo = "https://github.com/kgstorm/VL406"
+
+          pathlib.Path("firmware").mkdir(parents=True, exist_ok=True)
 
           manifest = {
               "name": "kgstorm.vl406",
@@ -103,27 +94,27 @@ jobs:
                       "ota": {
                           "md5": md5,
                           "path": filename,
-                          "summary": "See release notes for details.",
+                          "summary": f"See release notes for details.",
+                          "release_url": f"{repo}/releases/tag/{tag}",
                       },
                   }
               ],
           }
-          os.makedirs("firmware", exist_ok=True)
           with open("firmware/manifest.json", "w") as f:
               json.dump(manifest, f, indent=2)
               f.write("\n")
           PYEOF
         env:
           VERSION: ${{ steps.version.outputs.VERSION }}
+          TAG: ${{ github.ref_name }}
           MD5: ${{ steps.md5.outputs.MD5 }}
-          FILENAME: ${{ steps.firmware_ota.outputs.FILENAME }}
+          FILENAME: ${{ steps.firmware.outputs.FILENAME }}
 
-      - name: Stage firmware for GitHub Pages
+      - name: Stage firmware files for Pages
         run: |
-          mkdir -p firmware
-          cp ${{ steps.firmware_ota.outputs.FILENAME }} firmware/
+          cp "${{ steps.firmware.outputs.FILENAME }}" "firmware/${{ steps.firmware.outputs.FILENAME }}"
 
-      - name: Publish to GitHub Pages
+      - name: Publish firmware to GitHub Pages
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
