@@ -59,12 +59,17 @@ class SpaControlCard extends HTMLElement {
             .side-button ha-icon { color: inherit; pointer-events:none; }
 
             /* Circle */
-            .circle { --circle-size: 220px; position:relative; width:var(--circle-size); height:var(--circle-size); border-radius:50%; display:flex; flex-direction:column; align-items:center; justify-content:center; background:var(--paper-card-background-color,#fff); box-shadow: inset 0 0 0 6px var(--primary-color, #03A9F4); flex-shrink:0; }
+            .circle { --circle-size: 220px; position:relative; width:var(--circle-size); height:var(--circle-size); border-radius:50%; display:flex; flex-direction:column; align-items:center; justify-content:center; background:var(--ha-card-background,var(--paper-card-background-color,var(--card-background-color,#121212))); box-shadow: inset 0 0 0 6px var(--primary-color, #03A9F4); flex-shrink:0; }
+
+            /* Mode label inside circle */
+            #mode-label { font-size:13px; font-weight:600; letter-spacing:0.06em; color:var(--primary-color,#03A9F4); text-transform:uppercase; height:16px; line-height:16px; margin-bottom:2px; opacity:1; transition:opacity .2s; transform:translateY(9px); }
+            #mode-label:empty { opacity:0; }
+            .circle .meas { transform:translateY(9px); }
+            #temp-group { display:flex; flex-direction:column; align-items:center; transform:translateY(-11px); }
 
             /* Mode strip below the main row */
             #mode-strip { display:flex; flex-direction:row; gap:8px; width:100%; margin-top:12px; box-sizing:border-box; }
             .mode-button { flex:1; height:40px; border-radius:8px; border:2px solid rgba(0,0,0,0.15); background:var(--card-background-color,#fff); color:var(--primary-text-color,#000); font-weight:600; font-size:14px; cursor:pointer; transition: background .18s, color .18s, border-color .18s, box-shadow .18s; box-shadow: 0 2px 6px rgba(0,0,0,0.08); }
-            .mode-button.active { background:var(--primary-color,#03A9F4); color:#fff; border-color:var(--primary-color,#03A9F4); box-shadow:0 4px 14px rgba(3,169,244,0.35); }
             .mode-button.tap { transform: scale(0.96) !important; transition: transform .08s ease !important; }
 
             /* Container queries — respond to actual card width, not viewport width */
@@ -72,8 +77,10 @@ class SpaControlCard extends HTMLElement {
               .spa-left, .spa-right { width:70px; gap:5px; }
               #spa-row { gap:6px; }
               .circle { --circle-size: 196px; }
-              .circle .meas { font-size:46px !important; }
-              .set-row { font-size:14px !important; margin-top:6px !important; }
+              .circle .meas { font-size:46px !important; transform:translateY(0); }
+              .set-row { font-size:14px !important; margin-top:-8px !important; }
+              #temp-group { transform:translateY(-6px); }
+              #mode-label { transform:translateY(0); }
               .side-button { height:38px; font-size:12px; }
               .mode-button { height:36px; font-size:13px; }
             }
@@ -81,11 +88,13 @@ class SpaControlCard extends HTMLElement {
               .spa-left, .spa-right { width:58px; gap:4px; }
               #spa-row { gap:5px; }
               .circle { --circle-size: 166px; }
-              .circle .meas { font-size:34px !important; }
-              .set-row { font-size:12px !important; margin-top:4px !important; }
+              .circle .meas { font-size:34px !important; transform:translateY(0); }
+              .set-row { font-size:12px !important; margin-top:-2px !important; }
+              #temp-group { transform:translateY(-7px); }
+              #mode-label { transform:translateY(0); }
               .side-button { height:32px; font-size:11px; }
               .inner-sensors ha-icon { width:22px !important; height:22px !important; }
-              .inner-sensors { bottom:8px !important; width:58% !important; }
+              .inner-sensors { bottom:25px !important; width:58% !important; }
               .mode-button { height:30px; font-size:12px; }
             }
 
@@ -93,7 +102,6 @@ class SpaControlCard extends HTMLElement {
             @media (prefers-color-scheme: dark) {
               .side-button { border-color:rgba(255,255,255,0.10); background:linear-gradient(#2a2a2a,#1d1d1d); box-shadow:0 4px 10px rgba(0,0,0,0.5); color:var(--primary-text-color,#fff); }
               .mode-button { border-color:rgba(255,255,255,0.10); background:linear-gradient(#2a2a2a,#1d1d1d); color:var(--primary-text-color,#fff); }
-              .mode-button.active { background:var(--primary-color,#03A9F4); color:#fff; border-color:var(--primary-color,#03A9F4); }
             }
 
             /* Optional card title */
@@ -112,9 +120,12 @@ class SpaControlCard extends HTMLElement {
 
                 <!-- Circle -->
                 <div class="circle">
-                  <div class="meas" style="font-size:60px;font-weight:700">—</div>
-                  <div class="set-row" style="margin-top:12px;font-size:18px;color:var(--secondary-text-color)"><span class="set-label">Set</span>: <span class="set">—</span></div>
-                  <div id="config_msg" style="margin-top:6px;font-size:12px;color:var(--error-color)"></div>
+                  <div id="temp-group">
+                    <div id="mode-label"></div>
+                    <div class="meas" style="font-size:60px;font-weight:700">—</div>
+                    <div class="set-row" style="margin-top:0;font-size:18px;color:var(--secondary-text-color)"><span class="set-label">Set</span>: <span class="set">—</span></div>
+                    <div id="config_msg" style="margin-top:6px;font-size:12px;color:var(--error-color)"></div>
+                  </div>
                   <div class="inner-sensors" style="position:absolute;left:50%;bottom:18px;transform:translateX(-50%);width:48%;display:flex;justify-content:space-between;align-items:flex-end;pointer-events:auto">
                     <div class="sensor heater" role="img" aria-label="Heater" style="display:flex;align-items:center;justify-content:center;">
                       <ha-icon id="heater_icon" icon="mdi:fire" style="width:32px;height:32px;color:var(--disabled-text-color,#bdbdbd);transform:translateY(-8px);transition:transform .18s ease,filter .18s ease,color .18s ease"></ha-icon>
@@ -186,7 +197,7 @@ class SpaControlCard extends HTMLElement {
     if (!this.config.lights_button_entity) this.config.lights_button_entity = `button.${this._device_norm}_spa_lights`;
 
     // spa mode sensor (tracks current heating mode: eco / standard / sleep)
-    if (!this.config.mode_entity) this.config.mode_entity = `text_sensor.${this._device_norm}_spa_mode`;
+    if (!this.config.mode_entity) this.config.mode_entity = `sensor.${this._device_norm}_spa_mode`;
 
     // initial update
     this._update();
@@ -301,6 +312,13 @@ class SpaControlCard extends HTMLElement {
     if (ecoBtn) ecoBtn.classList.toggle('active', this._modeMatches(modeVal, 'eco'));
     if (stdBtn) stdBtn.classList.toggle('active', this._modeMatches(modeVal, 'standard'));
     if (sleepBtn) sleepBtn.classList.toggle('active', this._modeMatches(modeVal, 'sleep'));
+    const modeLabelEl = this.querySelector('#mode-label');
+    if (modeLabelEl) {
+      if (this._modeMatches(modeVal, 'eco')) modeLabelEl.textContent = 'Eco';
+      else if (this._modeMatches(modeVal, 'sleep')) modeLabelEl.textContent = 'Sleep';
+      else if (this._modeMatches(modeVal, 'standard')) modeLabelEl.textContent = 'Std';
+      else modeLabelEl.textContent = '';
+    }
 
     // reflect busy state in controls (disable while adjusting set points)
     const controlBlocks = this.querySelectorAll('.side-left, .side-right');
