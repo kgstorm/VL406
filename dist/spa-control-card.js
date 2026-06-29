@@ -149,7 +149,7 @@ class SpaControlCard extends HTMLElement {
 
               <!-- Mode strip: Eco / Standard / Sleep -->
               <div id="mode-strip">
-                <button id="eco_btn" class="mode-button" title="Eco">Eco</button>
+                <button id="eco_btn" class="mode-button" title="Economy">Economy</button>
                 <button id="standard_btn" class="mode-button" title="Standard">Standard</button>
                 <button id="sleep_btn" class="mode-button" title="Sleep">Sleep</button>
               </div>
@@ -233,6 +233,10 @@ class SpaControlCard extends HTMLElement {
     if (setHighEl) setHighEl.style.display = (typeof this.config.high_setting !== 'undefined') ? 'flex' : 'none';
     if (setLowEl) setLowEl.style.display = (typeof this.config.low_setting !== 'undefined') ? 'flex' : 'none';
 
+    // show/hide mode strip based on config (default: visible)
+    const modeStripEl = this.querySelector('#mode-strip');
+    if (modeStripEl) modeStripEl.style.display = (this.config.show_mode_buttons !== false) ? 'flex' : 'none';
+
     // layout handled by CSS (no JS cutouts required).
   }
 
@@ -314,7 +318,7 @@ class SpaControlCard extends HTMLElement {
     if (sleepBtn) sleepBtn.classList.toggle('active', this._modeMatches(modeVal, 'sleep'));
     const modeLabelEl = this.querySelector('#mode-label');
     if (modeLabelEl) {
-      if (this._modeMatches(modeVal, 'eco')) modeLabelEl.textContent = 'Eco';
+      if (this._modeMatches(modeVal, 'eco')) modeLabelEl.textContent = 'Economy';
       else if (this._modeMatches(modeVal, 'sleep')) modeLabelEl.textContent = 'Sleep';
       else if (this._modeMatches(modeVal, 'standard')) modeLabelEl.textContent = 'Std';
       else modeLabelEl.textContent = '';
@@ -461,7 +465,7 @@ class SpaControlCard extends HTMLElement {
 
   // Returns true if a mode state string matches the given target ('eco', 'standard', 'sleep')
   _modeMatches(stateStr, target) {
-    if (target === 'eco')      return /eco|^ec$|ecn/.test(stateStr);
+    if (target === 'eco')      return /economy|eco|^ec$/.test(stateStr);
     if (target === 'standard') return /std|standard|^st$/.test(stateStr);
     if (target === 'sleep')    return /sleep|^sl$|slp/.test(stateStr);
     return false;
@@ -471,12 +475,6 @@ class SpaControlCard extends HTMLElement {
   // Cycle order (manufacturer confirmed): St -> Ec -> SL -> St
   async _setToMode(targetMode) {
     if (this._busy) return;
-
-    // Skip if already in target mode
-    const curState = this._hass.states[this.config.mode_entity];
-    const curVal = curState ? curState.state.toLowerCase() : '';
-    if (this._modeMatches(curVal, targetMode)) return;
-
     this._busy = true;
     this._update();
     try {
@@ -535,6 +533,8 @@ class SpaControlCard extends HTMLElement {
           const low = this.querySelector('#low_setting');
           const lowVal = typeof this._config.low_setting !== 'undefined' ? String(this._config.low_setting) : '';
           if (low && document.activeElement !== low && low.value !== lowVal) low.value = lowVal;
+          const modeToggle = this.querySelector('#show_mode_buttons');
+          if (modeToggle) modeToggle.checked = this._config.show_mode_buttons !== false;
         }
         render() {
           this.innerHTML = '';
@@ -573,16 +573,38 @@ class SpaControlCard extends HTMLElement {
           const highField = makeField('High setting (optional)', 'high_setting', 'number', false);
           const lowField = makeField('Low setting (optional)', 'low_setting', 'number', false);
 
+          // Toggle: show/hide mode buttons
+          const modeToggleWrapper = document.createElement('div');
+          modeToggleWrapper.style.display = 'flex';
+          modeToggleWrapper.style.alignItems = 'center';
+          modeToggleWrapper.style.gap = '8px';
+          modeToggleWrapper.style.marginTop = '4px';
+          const modeToggleInput = document.createElement('input');
+          modeToggleInput.id = 'show_mode_buttons';
+          modeToggleInput.type = 'checkbox';
+          modeToggleInput.style.width = '18px';
+          modeToggleInput.style.height = '18px';
+          modeToggleInput.style.cursor = 'pointer';
+          const modeToggleLabel = document.createElement('label');
+          modeToggleLabel.htmlFor = 'show_mode_buttons';
+          modeToggleLabel.textContent = 'Show Economy / Standard / Sleep mode buttons';
+          modeToggleLabel.style.fontSize = '13px';
+          modeToggleLabel.style.cursor = 'pointer';
+          modeToggleWrapper.appendChild(modeToggleInput);
+          modeToggleWrapper.appendChild(modeToggleLabel);
+
           container.appendChild(devField.wrapper);
           container.appendChild(titleField.wrapper);
           container.appendChild(highField.wrapper);
           container.appendChild(lowField.wrapper);
+          container.appendChild(modeToggleWrapper);
 
           // populate values
           devField.input.value = this._config.device_name || '';
           titleField.input.value = this._config.title || '';
           highField.input.value = typeof this._config.high_setting !== 'undefined' ? this._config.high_setting : '';
           lowField.input.value = typeof this._config.low_setting !== 'undefined' ? this._config.low_setting : '';
+          modeToggleInput.checked = this._config.show_mode_buttons !== false;
 
           // dispatch change events (debounced)
           let timeout = null;
@@ -594,6 +616,7 @@ class SpaControlCard extends HTMLElement {
               title: titleField.input.value !== '' ? titleField.input.value : undefined,
               high_setting: highField.input.value !== '' ? Number(highField.input.value) : undefined,
               low_setting: lowField.input.value !== '' ? Number(lowField.input.value) : undefined,
+              show_mode_buttons: modeToggleInput.checked,
             };
             this.dispatchEvent(new CustomEvent('config-changed', { detail: { config: cfg } }));
           };
@@ -605,6 +628,7 @@ class SpaControlCard extends HTMLElement {
           [devField.input, titleField.input, highField.input, lowField.input].forEach(i => {
             i.addEventListener('input', schedule);
           });
+          modeToggleInput.addEventListener('change', dispatch);
 
           this.appendChild(container);
         }
@@ -615,7 +639,7 @@ class SpaControlCard extends HTMLElement {
   }
 
   static getStubConfig() {
-    return { type: 'custom:spa-control-card', device_name: '', title: '', high_setting: undefined, low_setting: undefined };
+    return { type: 'custom:spa-control-card', device_name: '', title: '', high_setting: undefined, low_setting: undefined, show_mode_buttons: true };
   }
 }
 

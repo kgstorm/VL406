@@ -127,7 +127,7 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
   // for SET_FORCE_INTERVAL_MS milliseconds we auto-press COOL once to force the tub to
   // display and send the set temperature. We also update the timer when we auto-press.
   uint32_t last_set_sent_time_ms = 0;
-  static constexpr uint32_t SET_FORCE_INTERVAL_MS = 5u * 60u * 1000u;  // 5 minutes
+  static constexpr uint32_t SET_FORCE_INTERVAL_MS = 30u * 60u * 1000u;  // 30 minutes
   
   // Setters called from Python binding
   void set_measured_temp_sensor(esphome::sensor::Sensor *s) { measured_temp_sensor_ = s; }
@@ -374,22 +374,30 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
       if (pump_sensor_) { last_pump = pump_val; if (seen_p4_) pump_sensor_->publish_state(static_cast<bool>(pump_val)); }
       if (light_sensor_) { last_light = light_val; if (seen_p4_) light_sensor_->publish_state(static_cast<bool>(light_val)); }
 
-      // If p2/p3 form a valid temperature, clear any previous error and skip error processing
-      if (temp >= 0) {
+      // Decode char patterns for mode/error detection
+      char c2_hb = decode_7seg_char(p2);
+      char c3_hb = decode_7seg_char(p3);
+      bool is_mode_hb = (c2_hb == 'S' && c3_hb == 't') ||
+                        (c2_hb == 'E' && c3_hb == 'c') ||
+                        (c2_hb == 'S' && c3_hb == 'L');
+
+      // Publish mode heartbeat
+      if (spa_mode_text_sensor_ && !last_mode_.empty()) { spa_mode_text_sensor_->publish_state(last_mode_); }
+
+      // If p2/p3 form a valid temperature or mode string, clear any previous error and skip error processing
+      if (temp >= 0 || is_mode_hb) {
         if (!last_error_code_.empty()) {
           if (error_text_sensor_) error_text_sensor_->publish_state("");
           last_error_code_.clear(); candidate_error.clear(); stable_error = 0;
         }
       } else if (error_text_sensor_) {
-        char c2 = decode_7seg_char(p2);
-        char c3 = decode_7seg_char(p3);
         std::string code = "";
-        code.push_back(c2 != '\0' ? c2 : '?');
-        code.push_back(c3 != '\0' ? c3 : '?');
+        code.push_back(c2_hb != '\0' ? c2_hb : '?');
+        code.push_back(c3_hb != '\0' ? c3_hb : '?');
         const char *trans = translate_error_code(code);
 
         // Treat any decoded (non-blank) character sequence as a candidate error, or a known translation
-        if (trans != nullptr || (c2 != '\0' || c3 != '\0')) {
+        if (trans != nullptr || (c2_hb != '\0' || c3_hb != '\0')) {
           if (candidate_error == code) { if (stable_error < 255) stable_error++; } else { candidate_error = code; stable_error = 1; }
           if (stable_error >= ERROR_STABLE_THRESHOLD && code != last_error_code_) {
             if (trans) error_text_sensor_->publish_state(code + std::string(" - ") + trans);
@@ -490,7 +498,7 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
     // Publish spa mode when a stable mode string is detected
     if (is_mode_string) {
       std::string mode_str;
-      if      (c2_char == 'E') mode_str = "eco";
+      if      (c2_char == 'E') mode_str = "economy";
       else if (c2_char == 'S' && c3_char == 'L') mode_str = "sleep";
       else                     mode_str = "standard";
 
