@@ -1,109 +1,3 @@
-# Balboa VL406 Remote Discovery
-
-<p align="center">
-  <img src="docs/BalboaGS100Controller.png" width="45%" alt="Balboa GS100 Controller" />
-  <img src="docs/BalboaVL260TopsidePanel.png" width="45%" alt="Balboa 4-button topside panel" />
-</p>
-
-## Description
-
-This repository is an experimental ESPHome project for reverse-engineering a Balboa VL406-style 4-button topside panel using the known-good VL260 hardware interface as a starting point.
-
-The goal of this repo is different from the original VL260 project:
-
-- keep the electrical interface and button injection wiring that already works for the 4-button Balboa family
-- add remote commissioning hooks so a customer device can be observed and controlled from Home Assistant
-- capture raw frame data on demand so a VL406 decoder can be built from field data
-
-This repository is not yet a confirmed drop-in VL406 decoder. The current codebase is a lab scaffold for collecting data and iterating remotely.
-
----
-
-## Current Status
-
-- Hardware assumption: VCC, GND, DATA, and CLK are expected to match the VL260-style wiring.
-- Decoder status: the copied parser is still the VL260 parser until VL406 data collection is complete.
-- Remote-debug status: MQTT command/response is implemented with shared command topics and per-device response topics.
-
----
-
-## Repository Layout
-
-```text
-VL406/
-├── docs/
-├── esp32-spa/
-├── esp32-spa.yaml
-├── LICENSE
-└── spa-control-card.js
-```
-
-- `esp32-spa.yaml` is the starting ESPHome configuration for the lab device.
-- `esp32-spa/` contains the custom external component copied from the VL260 project.
-- `docs/REMOTE_COMMISSIONING.md` defines the intended MQTT, webhook, and OTA workflow.
-
----
-
-## Immediate Goals
-
-1. Boot the customer device on their Wi-Fi using captive portal once.
-2. Receive a boot notification and health status in Home Assistant.
-3. Trigger remote button presses from Home Assistant.
-4. Request raw frame snapshots from the device on demand.
-5. Use captured data to identify the VL406 frame layout and create a real decoder.
-
----
-
-## Software Installation
-
-1. Copy `esp32-spa.yaml` and the `esp32-spa/` folder into the `esphome/` directory used by Home Assistant.
-2. Create the required secrets in `secrets.yaml`.
-3. Import `esp32-spa.yaml` into ESPHome.
-4. Flash locally for the first install.
-5. After first join, future updates should use OTA only and must not use full flash erase if you want to preserve Wi-Fi credentials.
-
-The configuration currently expects these secrets:
-
-- `api_key`
-- `wifi_ssid`
-- `wifi_password`
-- `ota_password`
-- `ap_password`
-
-Additional MQTT and remote-debug secrets will be added when the command channel is implemented.
-
----
-
-## Wiring
-
-The starting wiring matches the known working 4-button Balboa wiring used by the VL260 project.
-
-ESP32 DEVKIT V1 GPIO assignments:
-
-| Spa RJ45 pin | Function | GPIO pin |
-|---:|---|---:|
-| 1 | VIN | VIN |
-| 2 | Warm Button | 25 |
-| 3 | Light Button | 27 |
-| 4 | GND | GND |
-| 5 | Display Data | 34 |
-| 6 | Clock | 35 |
-| 7 | Jets Button | 32 |
-| 8 | Cool Button | 26 |
-
-Treat this as a working hypothesis for VL406 until verified from field testing.
-
----
-
-## Frontend
-
-The included `spa-control-card.js` is copied from the VL260 project as a starting point. It is useful for local manual control, but it should be treated as provisional until the VL406 entities and remote-debug workflow are finalized.
-
----
-
-## Origin
-
-This project was bootstrapped from the working VL260 repository so that VL406 experimentation can move independently without destabilizing the original decoder.
 # Balboa-GS100-with-VL260-topside
 
 <p align="center">
@@ -113,11 +7,13 @@ This project was bootstrapped from the working VL260 repository so that VL406 ex
 
 ## Description
 
-This project adds an ESP32 to a Balboa GS100 (VL260 topside) to send and receive data using ESPHome and Home Assistant. It provides wiring, measurement notes, and an ESPHome configuration to integrate the spa panel with Home Assistant.
+This project adds an Wifi module to a Balboa Hot Tub. This project has been tested with a few Balboa control boards and seems to work with any VL200 series or VL400 series topside controllers. I imagine any 3 or 4-button Balboa topside controllers with RJ45 connectors would have a very similar setup. 
 
-This has only been tested with a Balboa GS100 control board and the VL260 topside panel, but this project should work for any spa with the VL260 topside panel. I imagine any 4-button Balboa topside controller would have a very similar setup. 
+---
 
-The GS100 has an RJ45 connector that sends and receives data to the topside panel. This project taps into that signal by creating a project box that the topside panel will plug into, and then with another ethernet type cable connect the project box back to the GS100 control board.
+## Purchase Option
+
+Everything you need to know to build a module is contained in this repository. However, I do have some modules available for purchase as well.
 
 ---
 
@@ -184,6 +80,7 @@ device_name: 'esp32-spa'      # required - replace with your esp device name
 title: 'Hot Tub Control'     # optional - card title
 high_setting: 103         # optional - Temp for one button press to high temp 
 low_setting: 80    # optional - Temp for one button press to low temp
+show_mode_buttons: true   # optional - show/hide Economy/Standard/Sleep buttons (default: true)
 
 ```
 
@@ -198,6 +95,14 @@ If the card doesn't appear immediately, try a hard-refresh (Ctrl/Cmd+Shift+R) or
 - This integration exposes a `text_sensor` for error codes (sensor.<device name>_spa_error_code). The text sensor shows the 2‑character code from the topside display and a friendly translation when available, for example:
 
   - `HH - high overheat (water temp over 118 F)`
+
+---
+
+## Heating Mode
+
+This integration exposes a `text_sensor` for the current heating mode (`sensor.<device_name>_spa_mode`). The possible states are **Standard**, **Economy**, and **Sleep**. Standard mode turns the heater and circulation pump on whenever the measured temperature drops below the set temperature. Economy only heats when the circulation pumps are programmed to run. Sleep mode also only heats when the circulation pumps are programmed to run, but also only heats to ~10C/20F below the set temperature. 
+
+The mode is detected by reading the 7-segment display characters `St`, `Ec`, or `SL` that the Balboa controller briefly shows during mode selection. The device automatically reads the current mode on boot (and every 30 minutes) by pressing the Cool button followed by the Light button.
 
 
 ### Example Home Assistant automation (mobile push notification)
@@ -282,11 +187,11 @@ Logic analyzer screenshot:
 ## Images
 
 
-![Connectors](docs/connectors.png)
+![PCB](docs/pcb.jpg)
 
-![PCB](docs/pcb.png)
+![Project Box](docs/box.jpg)
 
-![Mounted](docs/mounted.png)
+![Mounted](docs/mounted.jpg)
 
 ---
 
