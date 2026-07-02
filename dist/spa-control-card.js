@@ -284,10 +284,10 @@ class SpaControlCard extends HTMLElement {
     }
 
     if (pumpIcon) {
-      const unavailable = !pumpState || pumpState.state === 'unavailable';
+      const pumpVisible = pumpState && (pumpState.state === 'on' || pumpState.state === 'off');
       const pumpContainer = pumpIcon.closest('.sensor.pump');
-      if (pumpContainer) pumpContainer.style.display = unavailable ? 'none' : 'flex';
-      if (!unavailable) {
+      if (pumpContainer) pumpContainer.style.display = pumpVisible ? 'flex' : 'none';
+      if (pumpVisible) {
         const isOn = pumpState.state === 'on';
         pumpIcon.style.color = isOn ? '#03a9f4' : offColor; // bright blue when running
         pumpIcon.style.filter = isOn ? 'drop-shadow(0 0 8px rgba(3,169,244,0.9))' : 'none';
@@ -295,10 +295,10 @@ class SpaControlCard extends HTMLElement {
     }
 
     if (lightsIcon) {
-      const unavailable = !lightsState || lightsState.state === 'unavailable';
+      const lightsVisible = lightsState && (lightsState.state === 'on' || lightsState.state === 'off');
       const lightsContainer = lightsIcon.closest('.sensor.lights');
-      if (lightsContainer) lightsContainer.style.display = unavailable ? 'none' : 'flex';
-      if (!unavailable) {
+      if (lightsContainer) lightsContainer.style.display = lightsVisible ? 'flex' : 'none';
+      if (lightsVisible) {
         const isOn = lightsState.state === 'on';
         // default is a binary_sensor for light status — simple on/off styling
         lightsIcon.style.color = isOn ? '#ffd54f' : offColor; // warm yellow when on
