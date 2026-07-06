@@ -233,9 +233,9 @@ class SpaControlCard extends HTMLElement {
     if (setHighEl) setHighEl.style.display = (typeof this.config.high_setting !== 'undefined') ? 'flex' : 'none';
     if (setLowEl) setLowEl.style.display = (typeof this.config.low_setting !== 'undefined') ? 'flex' : 'none';
 
-    // show/hide mode strip based on config (default: visible)
+    // Initial mode strip visibility handled in _update() because it depends on entity availability.
     const modeStripEl = this.querySelector('#mode-strip');
-    if (modeStripEl) modeStripEl.style.display = (this.config.show_mode_buttons !== false) ? 'flex' : 'none';
+    if (modeStripEl) modeStripEl.style.display = 'none';
 
     // layout handled by CSS (no JS cutouts required).
   }
@@ -306,8 +306,13 @@ class SpaControlCard extends HTMLElement {
       }
     }
 
-    // Mode label inside circle — reflects current mode state
     const modeState = getState(this.config.mode_entity);
+    // Show mode controls only when explicitly enabled AND mode entity is present.
+    const modeStripEl = this.querySelector('#mode-strip');
+    const canShowModeControls = (this.config.show_mode_buttons !== false) && !!modeState;
+    if (modeStripEl) modeStripEl.style.display = canShowModeControls ? 'flex' : 'none';
+
+    // Mode label inside circle — reflects current mode state
     const modeVal = modeState && modeState.state !== 'unknown' && modeState.state !== 'unavailable'
       ? modeState.state.toLowerCase() : '';
     const modeLabelEl = this.querySelector('#mode-label');
