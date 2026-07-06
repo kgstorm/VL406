@@ -174,11 +174,6 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
       if (seg == map[d]) return static_cast<int8_t>(d);
     }
 
-    // Try reversed bit order (maybe wiring/order is reversed)
-    uint8_t rev = 0;
-    for (int i = 0; i < 7; ++i) rev |= ((seg >> i) & 0x1) << (6 - i);
-    for (uint8_t d = 0; d < 10; ++d) if (rev == map[d]) return static_cast<int8_t>(d);
-
     // If no exact match, treat as invalid (disregard)
     return -1;
   }
@@ -211,11 +206,6 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
     for (auto &p : letters) {
       if (seg == p.first) return p.second;
     }
-
-    // Try reversed bit order too (for wiring/order mismatches)
-    uint8_t rev = 0;
-    for (int i = 0; i < 7; ++i) rev |= ((seg >> i) & 0x1) << (6 - i);
-    for (auto &p : letters) if (rev == p.first) return p.second;
 
     return '\0';
   }
@@ -583,8 +573,8 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
       // We just saw a stable set indicator - update last_zero_seen_time
       last_zero_seen_time = now;
 
-      // If we saw a recent candidate temp (even just-before the zero), accept it as potential
-      if (set_temp_potential < 0 && candidate_temp >= 0 && (now - last_candidate_temp_time <= 3000)) {
+      // If we saw a recent stable candidate temp, accept it as potential
+      if (set_temp_potential < 0 && temp_stable && candidate_temp >= 0 && (now - last_candidate_temp_time <= 3000)) {
         set_temp_potential = candidate_temp; // raw numeric from display
         ESP_LOGD(TAG, "Zero detected and recent candidate found: set_temp_potential=%d (age=%ums)", set_temp_potential, static_cast<unsigned>(now - last_candidate_temp_time));
       }
@@ -593,8 +583,8 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
       pending_measured_temp = -1;
       pending_measured_since = 0;
       ESP_LOGD(TAG, "Zero detected (0x00), entering/staying in set mode");
-    } else if (candidate_temp >= 0 && in_set_mode) {
-      // We have observed a non-zero temp while already in set mode. Set as potential immediately
+    } else if (temp_stable && candidate_temp >= 0 && in_set_mode) {
+      // We have observed a stable non-zero temp while already in set mode. Set as potential.
       int16_t display_candidate = candidate_temp; // raw numeric from display
       if (set_temp_potential != display_candidate) {
         set_temp_potential = display_candidate;
