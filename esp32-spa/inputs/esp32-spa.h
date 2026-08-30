@@ -105,6 +105,13 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
   uint8_t stable_mode_ = 0;
   static constexpr uint8_t MODE_STABLE_THRESHOLD = 3;
 
+  // Filter cycle text sensor and state (F + digit)
+  esphome::text_sensor::TextSensor *filter_cycle_text_sensor_ = nullptr;
+  std::string last_filter_cycle_ = "";
+  std::string candidate_filter_cycle_ = "";
+  uint8_t stable_filter_cycle_ = 0;
+  static constexpr uint8_t FILTER_STABLE_THRESHOLD = 3;
+
   static constexpr uint32_t HEARTBEAT_MS = 30000;  // heartbeat every 30s (publish if unchanged)
   // Gap threshold (ms) to consider the start of a new frame (use ~15ms to match ~19ms observed gap)
   static constexpr uint32_t FRAME_GAP_MS =5;
@@ -141,6 +148,7 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
   void set_pump_sensor(esphome::binary_sensor::BinarySensor *s) { pump_sensor_ = s; }
   void set_light_sensor(esphome::binary_sensor::BinarySensor *s) { light_sensor_ = s; }
   void set_spa_mode_text_sensor(esphome::text_sensor::TextSensor *s) { spa_mode_text_sensor_ = s; }
+  void set_filter_cycle_text_sensor(esphome::text_sensor::TextSensor *s) { filter_cycle_text_sensor_ = s; }
 
 
 
