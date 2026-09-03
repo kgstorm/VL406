@@ -1,14 +1,14 @@
 {
   "name": "kgstorm.vl406",
-  "version": "3.0",
+  "version": "3.1",
   "builds": [
     {
       "chipFamily": "ESP32",
       "ota": {
-        "md5": "3ab374f557f301c87e8b76996d326e11",
-        "path": "vl406-3.0.bin",
+        "md5": "777cc55ff616f6b5162b3b8755406407",
+        "path": "vl406-3.1.bin",
         "summary": "See release notes for details.",
-        "release_url": "https://github.com/kgstorm/VL406/releases/tag/v3.0"
+        "release_url": "https://github.com/kgstorm/VL406/releases/tag/v3.1"
       }
     }
   ]
