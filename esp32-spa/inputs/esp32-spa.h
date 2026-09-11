@@ -259,47 +259,6 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
     gpio_set_direction((gpio_num_t)PIN_WRITE_BTN2, GPIO_MODE_OUTPUT);
     gpio_set_level((gpio_num_t)PIN_WRITE_BTN2, 0);
 
-    // Press COOL/LIGHTS three times after boot to capture the mode and cycle it back to the original setting.
-    // Delay all startup actions until after startup ignore window.
-    this->set_timeout("boot_press_cool_on", STARTUP_IGNORE_MS + 5000, [this]() {
-      ESP_LOGI(TAG, "Boot: auto-pressing COOL to initialize set temp");
-      gpio_set_level((gpio_num_t)PIN_WRITE_BTN2, 1);
-      last_set_sent_time_ms = esphome::millis();
-    });
-    this->set_timeout("boot_press_cool_off", STARTUP_IGNORE_MS + 5200, []() {
-      gpio_set_level((gpio_num_t)PIN_WRITE_BTN2, 0);
-    });
-    this->set_timeout("boot_press_light_on",  STARTUP_IGNORE_MS + 6700, []() {
-      gpio_set_level((gpio_num_t)PIN_WRITE_BTN3, 1);
-    });
-    this->set_timeout("boot_press_light_off", STARTUP_IGNORE_MS + 6900, []() {
-      gpio_set_level((gpio_num_t)PIN_WRITE_BTN3, 0);
-    });
-    this->set_timeout("boot_press_cool_on_2", STARTUP_IGNORE_MS + 8000, []() {
-      gpio_set_level((gpio_num_t)PIN_WRITE_BTN2, 1);
-    });
-    this->set_timeout("boot_press_cool_off_2", STARTUP_IGNORE_MS + 8200, []() {
-      gpio_set_level((gpio_num_t)PIN_WRITE_BTN2, 0);
-    });
-    this->set_timeout("boot_press_light_on_2",  STARTUP_IGNORE_MS + 9700, []() {
-      gpio_set_level((gpio_num_t)PIN_WRITE_BTN3, 1);
-    });
-    this->set_timeout("boot_press_light_off_2", STARTUP_IGNORE_MS + 9900, []() {
-      gpio_set_level((gpio_num_t)PIN_WRITE_BTN3, 0);
-    });
-    this->set_timeout("boot_press_cool_on_3", STARTUP_IGNORE_MS + 11000, []() {
-      gpio_set_level((gpio_num_t)PIN_WRITE_BTN2, 1);
-    });
-    this->set_timeout("boot_press_cool_off_3", STARTUP_IGNORE_MS + 11200, []() {
-      gpio_set_level((gpio_num_t)PIN_WRITE_BTN2, 0);
-    });
-    this->set_timeout("boot_press_light_on_3",  STARTUP_IGNORE_MS + 12700, []() {
-      gpio_set_level((gpio_num_t)PIN_WRITE_BTN3, 1);
-    });
-    this->set_timeout("boot_press_light_off_3", STARTUP_IGNORE_MS + 12900, []() {
-      gpio_set_level((gpio_num_t)PIN_WRITE_BTN3, 0);
-    });
-
     // If startup mode detection found Sleep, briefly move to Economy to expose measured temp,
     // then return to Sleep after 6 seconds.
     this->set_timeout("boot_sleep_mode_refresh_check", STARTUP_IGNORE_MS + 14000, [this]() {

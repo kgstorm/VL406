@@ -12,7 +12,10 @@ esphome:
   on_boot:
     priority: -100
     then:
-      - delay: 65s
+      - delay: 35s
+      - script.execute: spa_mode_boot_read
+      - script.wait: spa_mode_boot_read
+      - delay: 25s
       - script.execute: filter_cycle_read
 
 esp32:
@@ -237,6 +240,16 @@ select:
       - script.execute: filter_cycle_worker
 
 script:
+  # Read the current heating mode without toggling the physical light.
+  - id: spa_mode_boot_read
+    mode: single
+    then:
+      - repeat:
+          count: 3
+          then:
+            - script.execute: spa_mode_step
+            - script.wait: spa_mode_step
+
   # Move the spa towards the latest requested heating mode.
   - id: spa_mode_worker
     mode: single
