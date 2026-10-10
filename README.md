@@ -81,8 +81,11 @@ title: 'Hot Tub Control'     # optional - card title
 high_setting: 103         # optional - Temp for one button press to high temp 
 low_setting: 80    # optional - Temp for one button press to low temp
 show_mode_buttons: true   # optional - show/hide Economy/Standard/Sleep buttons (default: true)
+heating_mode_enable_entity: 'switch.esp32_spa_spa_heating_mode_control' # optional - hide mode buttons while this switch is off
 
 ```
+
+The `Spa Heating Mode Control` and `Spa Filter Cycle Control` switches default to enabled and restore their last state after reboot. Turning either off prevents its related button presses, including the automatic boot-time read. Set `heating_mode_enable_entity` to the actual heating-mode control switch entity to hide the card's mode buttons when disabled; the filter-cycle selector remains an entity and is not displayed on this card.
 
 If the card doesn't appear immediately, try a hard-refresh (Ctrl/Cmd+Shift+R) or clear the browser cache.
 
@@ -113,6 +116,8 @@ The device exposes the following entities in Home Assistant:
 - `select.<device_name>_spa_filter_cycle` — filter cycle selector
 - `select.<device_name>_spa_display_unit` — temperature unit selector (`°C` / `°F`)
 - `select.<device_name>_spa_heating_mode` — heating mode selector (`Standard`, `Economy`, `Sleep`)
+- `switch.<device_name>_spa_heating_mode_control` — enable or disable heating-mode button control
+- `switch.<device_name>_spa_filter_cycle_control` — enable or disable filter-cycle button control
 - `number.<device_name>_spa_high_temperature` — configurable high preset (15-105 in the selected display unit)
 - `number.<device_name>_spa_low_temperature` — configurable low preset (15-105 in the selected display unit)
 - `button.<device_name>_spa_warm` — virtual warm button press

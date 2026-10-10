@@ -307,9 +307,14 @@ class SpaControlCard extends HTMLElement {
     }
 
     const modeState = getState(this.config.mode_entity);
+    const modeEnableState = this.config.heating_mode_enable_entity
+      ? getState(this.config.heating_mode_enable_entity)
+      : null;
+    const modeControlEnabled = !this.config.heating_mode_enable_entity ||
+      (modeEnableState && modeEnableState.state === 'on');
     // Show mode controls only when explicitly enabled AND mode entity is present.
     const modeStripEl = this.querySelector('#mode-strip');
-    const canShowModeControls = (this.config.show_mode_buttons !== false) && !!modeState;
+    const canShowModeControls = (this.config.show_mode_buttons !== false) && !!modeState && modeControlEnabled;
     if (modeStripEl) modeStripEl.style.display = canShowModeControls ? 'flex' : 'none';
 
     // Mode label inside circle — reflects current mode state
@@ -532,6 +537,10 @@ class SpaControlCard extends HTMLElement {
           if (low && document.activeElement !== low && low.value !== lowVal) low.value = lowVal;
           const modeToggle = this.querySelector('#show_mode_buttons');
           if (modeToggle) modeToggle.checked = this._config.show_mode_buttons !== false;
+          const modeEnableEntity = this.querySelector('#heating_mode_enable_entity');
+          if (modeEnableEntity && document.activeElement !== modeEnableEntity) {
+            modeEnableEntity.value = this._config.heating_mode_enable_entity || '';
+          }
         }
         render() {
           this.innerHTML = '';
@@ -569,6 +578,7 @@ class SpaControlCard extends HTMLElement {
           const titleField = makeField('Title (optional)', 'title', 'text', false);
           const highField = makeField('High setting (optional)', 'high_setting', 'number', false);
           const lowField = makeField('Low setting (optional)', 'low_setting', 'number', false);
+          const modeEnableField = makeField('Heating mode control switch entity (optional)', 'heating_mode_enable_entity', 'text', false);
 
           // Toggle: show/hide mode buttons
           const modeToggleWrapper = document.createElement('div');
@@ -594,6 +604,7 @@ class SpaControlCard extends HTMLElement {
           container.appendChild(titleField.wrapper);
           container.appendChild(highField.wrapper);
           container.appendChild(lowField.wrapper);
+          container.appendChild(modeEnableField.wrapper);
           container.appendChild(modeToggleWrapper);
 
           // populate values
@@ -601,6 +612,7 @@ class SpaControlCard extends HTMLElement {
           titleField.input.value = this._config.title || '';
           highField.input.value = typeof this._config.high_setting !== 'undefined' ? this._config.high_setting : '';
           lowField.input.value = typeof this._config.low_setting !== 'undefined' ? this._config.low_setting : '';
+          modeEnableField.input.value = this._config.heating_mode_enable_entity || '';
           modeToggleInput.checked = this._config.show_mode_buttons !== false;
 
           // dispatch change events (debounced)
@@ -613,6 +625,7 @@ class SpaControlCard extends HTMLElement {
               title: titleField.input.value !== '' ? titleField.input.value : undefined,
               high_setting: highField.input.value !== '' ? Number(highField.input.value) : undefined,
               low_setting: lowField.input.value !== '' ? Number(lowField.input.value) : undefined,
+              heating_mode_enable_entity: modeEnableField.input.value.trim() || undefined,
               show_mode_buttons: modeToggleInput.checked,
             };
             this.dispatchEvent(new CustomEvent('config-changed', { detail: { config: cfg } }));
@@ -622,7 +635,7 @@ class SpaControlCard extends HTMLElement {
             timeout = setTimeout(dispatch, 250);
           };
 
-          [devField.input, titleField.input, highField.input, lowField.input].forEach(i => {
+          [devField.input, titleField.input, highField.input, lowField.input, modeEnableField.input].forEach(i => {
             i.addEventListener('input', schedule);
           });
           modeToggleInput.addEventListener('change', dispatch);
@@ -636,7 +649,7 @@ class SpaControlCard extends HTMLElement {
   }
 
   static getStubConfig() {
-    return { type: 'custom:spa-control-card', device_name: '', title: '', high_setting: undefined, low_setting: undefined, show_mode_buttons: true };
+    return { type: 'custom:spa-control-card', device_name: '', title: '', high_setting: undefined, low_setting: undefined, heating_mode_enable_entity: '', show_mode_buttons: true };
   }
 }
 

@@ -1,5 +1,5 @@
 substitutions:
-  version: "3.2"
+  version: "3.3"
 
 esphome:
   name: vl406
@@ -13,10 +13,18 @@ esphome:
     priority: -100
     then:
       - delay: 35s
-      - script.execute: spa_mode_boot_read
-      - script.wait: spa_mode_boot_read
+      - if:
+          condition:
+            switch.is_on: spa_heating_mode_control
+          then:
+            - script.execute: spa_mode_boot_read
+            - script.wait: spa_mode_boot_read
       - delay: 25s
-      - script.execute: filter_cycle_read
+      - if:
+          condition:
+            switch.is_on: spa_filter_cycle_control
+          then:
+            - script.execute: filter_cycle_read
 
 esp32:
   board: esp32dev
@@ -206,14 +214,20 @@ select:
     optimistic: false
 
     set_action:
-      # Store the latest requested mode and immediately show it
-      # in Home Assistant/Homey.
-      - lambda: |-
-          id(spa_mode_target) = x;
-          id(spa_heating_mode).publish_state(x);
-
-      # The worker always works towards the latest target.
-      - script.execute: spa_mode_worker
+      - if:
+          condition:
+            switch.is_on: spa_heating_mode_control
+          then:
+            - lambda: |-
+                id(spa_mode_target) = x;
+                id(spa_heating_mode).publish_state(x);
+            - script.execute: spa_mode_worker
+          else:
+            - lambda: |-
+                const auto mode = id(spa_mode_state).state;
+                if (mode == "Standard" || mode == "Economy" || mode == "Sleep") {
+                  id(spa_heating_mode).publish_state(mode);
+                }
 
   - platform: template
     name: "Spa Filter Cycle"
@@ -231,13 +245,37 @@ select:
     optimistic: false
 
     set_action:
-      # Store the requested filter cycle and immediately show it
-      # in Home Assistant/Homey.
-      - lambda: |-
-          id(filter_cycle_target) = x;
-          id(spa_filter_cycle).publish_state(x);
+      - if:
+          condition:
+            switch.is_on: spa_filter_cycle_control
+          then:
+            - lambda: |-
+                id(filter_cycle_target) = x;
+                id(spa_filter_cycle).publish_state(x);
+            - script.execute: filter_cycle_worker
+          else:
+            - lambda: |-
+                const auto filter = id(spa_filter_cycle_state).state;
+                if (filter == "F1" || filter == "F2" || filter == "F3" ||
+                    filter == "F4" || filter == "F5" || filter == "F6" ||
+                    filter == "F7" || filter == "F8") {
+                  id(spa_filter_cycle).publish_state(filter);
+                }
 
-      - script.execute: filter_cycle_worker
+switch:
+  - platform: template
+    name: "Spa Heating Mode Control"
+    id: spa_heating_mode_control
+    icon: "mdi:hot-tub"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+
+  - platform: template
+    name: "Spa Filter Cycle Control"
+    id: spa_filter_cycle_control
+    icon: "mdi:filter"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
 
 script:
   # Read the current heating mode without toggling the physical light.
@@ -247,8 +285,12 @@ script:
       - repeat:
           count: 3
           then:
-            - script.execute: spa_mode_step
-            - script.wait: spa_mode_step
+            - if:
+                condition:
+                  switch.is_on: spa_heating_mode_control
+                then:
+                  - script.execute: spa_mode_step
+                  - script.wait: spa_mode_step
 
   # Move the spa towards the latest requested heating mode.
   - id: spa_mode_worker
@@ -260,7 +302,8 @@ script:
             - if:
                 condition:
                   lambda: |-
-                    return id(spa_mode_state).state != id(spa_mode_target);
+                    return id(spa_heating_mode_control).state &&
+                           id(spa_mode_state).state != id(spa_mode_target);
                 then:
                   - script.execute: spa_mode_step
                   - script.wait: spa_mode_step
@@ -285,71 +328,90 @@ script:
   - id: spa_mode_step
     mode: single
     then:
-      - output.turn_on: spa_warm_out
-      - delay: 100ms
-      - output.turn_off: spa_warm_out
-      - delay: 500ms
-      - output.turn_on: spa_lights_out
-      - delay: 100ms
-      - output.turn_off: spa_lights_out
-      - delay: 1000ms
+      - if:
+          condition:
+            switch.is_on: spa_heating_mode_control
+          then:
+            - output.turn_on: spa_warm_out
+            - delay: 100ms
+            - output.turn_off: spa_warm_out
+            - delay: 500ms
+            - output.turn_on: spa_lights_out
+            - delay: 100ms
+            - output.turn_off: spa_lights_out
+            - delay: 1000ms
 
   # Read the current filter cycle without changing it.
   - id: filter_cycle_read
     mode: single
     then:
-      # COOL
-      - output.turn_on: spa_cool_out
-      - delay: 100ms
-      - output.turn_off: spa_cool_out
-      - delay: 500ms
+      - if:
+          condition:
+            switch.is_on: spa_filter_cycle_control
+          then:
+            # COOL
+            - output.turn_on: spa_cool_out
+            - delay: 100ms
+            - output.turn_off: spa_cool_out
+            - delay: 500ms
+            - if:
+                condition:
+                  switch.is_on: spa_filter_cycle_control
+                then:
+                  # PUMPS: enter filter-cycle menu.
+                  - output.turn_on: spa_pumps_out
+                  - delay: 100ms
+                  - output.turn_off: spa_pumps_out
+                  - delay: 1500ms
 
-      # PUMPS: enter filter-cycle menu.
-      - output.turn_on: spa_pumps_out
-      - delay: 100ms
-      - output.turn_off: spa_pumps_out
-      - delay: 1500ms
-
-      # PUMPS: leave filter-cycle menu without changing the value.
-      - output.turn_on: spa_pumps_out
-      - delay: 100ms
-      - output.turn_off: spa_pumps_out
-      - delay: 500ms
+                  # PUMPS: leave filter-cycle menu without changing the value.
+                  - output.turn_on: spa_pumps_out
+                  - delay: 100ms
+                  - output.turn_off: spa_pumps_out
+                  - delay: 500ms
 
   # Enter the filter menu, move to the requested F1-F8 setting,
   # then leave the menu with PUMPS.
   - id: filter_cycle_worker
     mode: single
     then:
-      # COOL
-      - output.turn_on: spa_cool_out
-      - delay: 100ms
-      - output.turn_off: spa_cool_out
-      - delay: 500ms
-
-      # PUMPS: enter filter-cycle menu.
-      - output.turn_on: spa_pumps_out
-      - delay: 100ms
-      - output.turn_off: spa_pumps_out
-      - delay: 1500ms
-
-      # Step through F1-F8 until the requested value is displayed.
-      - repeat:
-          count: 8
+      - if:
+          condition:
+            switch.is_on: spa_filter_cycle_control
           then:
+            # COOL
+            - output.turn_on: spa_cool_out
+            - delay: 100ms
+            - output.turn_off: spa_cool_out
+            - delay: 500ms
             - if:
                 condition:
-                  lambda: |-
-                    return id(spa_filter_cycle_state).state != id(filter_cycle_target);
+                  switch.is_on: spa_filter_cycle_control
                 then:
-                  - script.execute: filter_cycle_step
-                  - script.wait: filter_cycle_step
+                  # PUMPS: enter filter-cycle menu.
+                  - output.turn_on: spa_pumps_out
+                  - delay: 100ms
+                  - output.turn_off: spa_pumps_out
+                  - delay: 1500ms
 
-      # PUMPS: leave filter-cycle menu.
-      - output.turn_on: spa_pumps_out
-      - delay: 100ms
-      - output.turn_off: spa_pumps_out
-      - delay: 500ms
+                  # Step through F1-F8 until the requested value is displayed.
+                  - repeat:
+                      count: 8
+                      then:
+                        - if:
+                            condition:
+                              lambda: |-
+                                return id(spa_filter_cycle_control).state &&
+                                       id(spa_filter_cycle_state).state != id(filter_cycle_target);
+                            then:
+                              - script.execute: filter_cycle_step
+                              - script.wait: filter_cycle_step
+
+                  # Always leave the menu, even if control was disabled mid-operation.
+                  - output.turn_on: spa_pumps_out
+                  - delay: 100ms
+                  - output.turn_off: spa_pumps_out
+                  - delay: 500ms
 
       # If the requested value was not reached, restore the selector
       # to the value actually observed on the spa display.
